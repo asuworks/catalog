@@ -18,11 +18,14 @@ zotero_data.json
 
 # Dumps
 catalog.sql
+*.sql.*
 *.dump
+*.dump.*
+private/
 
 ### Docker
 docker-compose.yml
-docker
+/docker/
 deploy/state/
 
 ### Django ###

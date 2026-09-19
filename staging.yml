@@ -7,18 +7,8 @@ services:
     image: ${CATALOG_IMAGE}
     environment:
       DOMAIN_NAME: 'staging-catalog.comses.net'
-      # Per-release ES endpoint gate (service names from base.yml):
-      # elasticsearch = ES 6.6.2,
-      # elasticsearch8 = ES 8.15.5. Switching a release to ES8 is gated:
-      # rebuild_es_index against ES8 + validation FIRST (runbook). Rollback
-      # is a redeploy of the recorded prior image with its recorded host, never an
-      # endpoint-only change.
+      # The release state records the single supported Elasticsearch service.
       ELASTICSEARCH_HOST: ${CATALOG_ES_HOST:?CATALOG_ES_HOST must be set}
-      # Startup ordering: Compose cannot name a depends_on service from a
-      # variable, so the release does not gate on Elasticsearch here.
-      # deploy/docker/prod.sh blocks (wait-for-it -t 0) on exactly this
-      # endpoint before Gunicorn starts, and the endpoint the release does
-      # not use is never waited on.
     # Container labels record the deployment/rollback state:
     # which immutable image is deployed, which image was deployed before
     # this rollout (the rollback unit), and which ES endpoint the release
@@ -36,6 +26,41 @@ services:
       # container in the same stack) can only reach it through this shared
       # volume. See deploy/docker/prod.sh (bind) and the nginx upstream.
       - gunicornsocket:/catalog/socket
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --unix-socket /catalog/socket/gunicorn.sock http://localhost/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+  scheduler:
+    image: ${CATALOG_IMAGE}
+    command: ["/bin/sh", "/code/deploy/docker/scheduler.sh"]
+    environment:
+      DOMAIN_NAME: 'staging-catalog.comses.net'
+      DJANGO_SETTINGS_MODULE: 'catalog.settings.prod'
+      LANG: "C.UTF-8"
+      DB_USER: catalog
+      DB_HOST: db
+      DB_NAME: comses_catalog
+      DB_PORT: 5432
+      ELASTICSEARCH_HOST: ${CATALOG_ES_HOST:?CATALOG_ES_HOST must be set}
+    labels:
+      - comses.catalog.image=${CATALOG_IMAGE}
+      - comses.catalog.previous-image=${CATALOG_PREVIOUS_IMAGE:-none}
+      - comses.catalog.previous-es-host=${CATALOG_PREVIOUS_ES_HOST:-none}
+      - comses.catalog.es-host=${CATALOG_ES_HOST:?CATALOG_ES_HOST must be set}
+    restart: always
+    volumes:
+      - ./docker/shared:/shared
+    secrets:
+      - catalog_django_config
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
   nginx:
     image: nginx:1.28.3
     restart: always
@@ -46,9 +71,10 @@ services:
       - ./docker/shared/nginx/logs:/var/log/nginx
     command: ["nginx", "-g", "daemon off;"]
     ports:
-      - "80:80"
+      - "${CATALOG_HTTP_BIND:-127.0.0.1:80}:80"
     depends_on:
-      - django
+      django:
+        condition: service_healthy
 
 volumes:
   # Renamed from uwsgisocket when the app server moved from uWSGI to

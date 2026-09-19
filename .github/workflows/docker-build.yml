@@ -31,7 +31,7 @@ jobs:
       # required ES host (there must be no silent default).
       env:
         CATALOG_IMAGE: comses/catalog/ci:ci-${{ github.sha }}
-        CATALOG_ES_HOST: elasticsearch8
+        CATALOG_ES_HOST: elasticsearch
       run: |
         bash scripts/compose.sh staging /tmp/catalog-ci-staging.yml
         grep -q "image: ${CATALOG_IMAGE}" /tmp/catalog-ci-staging.yml
@@ -54,7 +54,6 @@ jobs:
       # needs only a plain Docker daemon.
       env:
         CATALOG_IMAGE: comses/catalog/ci:ci-${{ github.sha }}
-        CATALOG_ES_HOST: elasticsearch8
       run: |
         bash scripts/deploy.sh build
         docker run --rm "${CATALOG_IMAGE}" gunicorn --version

@@ -7,7 +7,7 @@ Provides web tools for annotating and managing bibliographic references for publ
 
 If you find this software useful please consider stepping up to help us support it in the Open Source spirit. We're looking for maintainers, so let us know if you are interested in contributing! The [citation](https://github.com/comses/citation/) Python package is also a key component that would need maintenance alongside.
 
-Maintenance would be to keep up with dependency upgrades, migrate fully from Solr to elasticsearch, etc.
+Maintenance includes keeping dependencies and deployment infrastructure current.
 
 ## Development Environment
 To build a development environment for the project you will need to install:
@@ -23,13 +23,11 @@ make bootstrap
 make up
 ```
 
-Then the database and search indices need to be loaded and populated with data
+Restore a database dump; the restore migrates the database, rebuilds the search
+indexes, validates them, and refreshes the visualization cache.
 
 ```
-make shell
-inv rfd -f
-inv ri
-./manage.py populate_visualization_cache
+DUMP=./catalog.sql.xz CONFIRM=comses_catalog make restore
 ```
 
 ## Deployment (staging / prod)
@@ -38,7 +36,7 @@ Use the root `Makefile` as the supported deployment interface. Staging and
 prod share the single Compose project `catalog`. A release is an immutable
 application image reference (explicit tag or digest; `:latest`, bare
 references, and malformed digests are rejected) together with an explicit
-`CATALOG_ES_HOST` (`elasticsearch` or `elasticsearch8`).
+`CATALOG_ES_HOST` (`elasticsearch`).
 
 The root `docker-compose.yml` is the last-known-good generated release
 configuration. A deploy renders a temporary candidate and runs Compose from
@@ -82,8 +80,13 @@ For inspection only, root Compose commands such as `docker compose ps`,
 ordinary root `docker compose up` or `down` as a deployment procedure; use
 `make deploy`, `make start`, or `make stop`.
 
-Switching a release to Elasticsearch 8 is a **gated action**: use
-`CATALOG_IMAGE=<current-image> CONFIRM_ES8_CUTOVER=1 make es8-cutover ENV=staging`.
-This performs the rebuild, validation, and deployment as one path; the image
-must be the already deployed candidate. See [docs/deployment-runbook.md](docs/deployment-runbook.md)
-for operational prerequisites, lifecycle, rollback, and migration details.
+After the first deployment using Elasticsearch 8, rebuild and validate the
+search indexes before accepting the release:
+
+```sh
+make search-rebuild
+make search-validate
+```
+
+See [docs/deployment-runbook.md](docs/deployment-runbook.md) for operational
+prerequisites, lifecycle, rollback, database restore, and release details.

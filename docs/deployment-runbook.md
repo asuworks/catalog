@@ -1,16 +1,18 @@
 # Deployment runbook
 
-This runbook covers the single-host Docker Compose project `catalog`. Use the
-root `Makefile` for every deployment mutation. Staging and prod use the same
-stack and project name; normally deploy to staging, validate, then promote the
-same release to prod.
+This runbook covers the single-host Docker Compose project `catalog`.
+Use the root `Makefile` for every deployment mutation.
+The current implementation treats staging and production as sequential modes of the same host, stack, database, and search service.
+Deploy to staging, validate, then promote the same release to production.
+Independent staging and production hosts are proposed in `docs/proposals/candidate-centered-multi-host-deployment.md`, but are not implemented by this workflow.
+For the shortest complete procedure, follow `docs/pre-release-testing.md`.
 
 ## Release contract
 
 `CATALOG_IMAGE` must be an immutable reference: an explicit tag guaranteed not
 to be retagged, or a `sha256` digest. `:latest`, bare references, and malformed
-digests are rejected. `CATALOG_ES_HOST` must be explicitly selected as
-`elasticsearch` (ES 6.6.2) or `elasticsearch8` (ES 8.15.5). There is no ES
+digests are rejected. `CATALOG_ES_HOST` must be explicitly set to
+`elasticsearch`, the Elasticsearch 8.19.21 service. There is no search-host
 default for a first deployment.
 
 With an existing `deploy/state/release.env`, omitted image and endpoint values
@@ -34,9 +36,13 @@ CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> make image-build
 CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> make image-push
 ```
 
-The deploy preflight validates credentials, image immutability and image
-resolvability before changing the running stack. Solr is built locally before
-Compose startup because its image is not published.
+`image-build` refuses a dirty Catalog or Citation worktree.
+Use `ALLOW_DIRTY_BUILD=1` only for a disposable rehearsal image.
+Before the Docker build, `scripts/deploy.sh` writes `git describe --tags --always --dirty` to `release-version.txt`.
+The Dockerfile copies that file into `/code`, Django settings load it at startup, and the shared footer renders it.
+
+The deploy preflight validates credentials, image immutability, and image
+resolvability before changing the running stack.
 
 ## Root config and state safety
 
@@ -62,16 +68,23 @@ a legacy migration or conflict manually, then use Make commands again.
 ## Prerequisites
 
 - Docker Compose v2 and a reachable single Docker host; no Swarm is required.
+- After adding the operator to the `docker` group, log out and back in before running deployment commands.
 - Elasticsearch hosts should meet the host prerequisite `vm.max_map_count >= 262144`.
 - `deploy/conf/config.ini` and `deploy/conf/postgres_password` must exist and
   be nonempty. Run `make config-validate`.
-- The Postgres bind mount is `./docker/pgdata`. Named volumes include
-  `catalog_esdata`, `catalog_esdata8`, `catalog_solr`, `catalog_static`, and
-  `catalog_gunicornsocket`; deployment lifecycle commands do not delete them.
-- Deploy creates `docker/shared/catalog/logs` and
-  `docker/shared/nginx/logs`.
+- Provision real secrets on staging and production.
+  Use `make config-generate` only when generated credentials are appropriate for a fresh or disposable host.
+- The Postgres bind mount is `./docker/pgdata`. Active named volumes are
+  `catalog_esdata`, `catalog_static`, and `catalog_gunicornsocket`; deployment
+  lifecycle commands do not delete them.
+- During the first Elasticsearch 8 release, retain legacy `catalog_esdata` and
+  `catalog_solr` volumes until staging and production acceptance is complete.
+- Schema migration and deploy create writable `docker/shared/catalog/logs`,
+  `docker/shared/logs`, and `docker/shared/nginx/logs` before starting containers.
 - The selected image must be available locally or pullable, and the staging or
-  production DNS name must reach the host on port 80.
+  production ingress must reach Nginx.
+- Nginx binds to `127.0.0.1:80` by default for a local TLS proxy.
+  Set `CATALOG_HTTP_BIND=0.0.0.0:80` when ingress must connect over the host network.
 
 ## Development boundary and inspection
 
@@ -113,7 +126,10 @@ CATALOG_ES_HOST=elasticsearch CONFIRM_PRODUCTION_MIGRATION=1 \
 make schema-migrate ENV=staging
 CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> \
 CATALOG_ES_HOST=elasticsearch make deploy ENV=staging
+make search-rebuild
+make search-validate
 # smoke-test staging, then promote without rerunning schema-migrate:
+make backup
 make deploy ENV=prod
 ```
 
@@ -144,7 +160,10 @@ CATALOG_ES_HOST=elasticsearch CONFIRM_PRODUCTION_MIGRATION=1 \
 make schema-migrate ENV=staging
 CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> \
 CATALOG_ES_HOST=elasticsearch make deploy ENV=staging
-# smoke-test, then promote the same image/endpoint:
+make search-rebuild
+make search-validate
+# smoke-test, then promote the same image and endpoint:
+make backup
 make deploy ENV=prod
 ```
 
@@ -173,34 +192,52 @@ tear down networks or delete volumes. Database operations are:
 
 ```sh
 make backup
-make restore
+DUMP=./catalog.sql.xz CONFIRM=comses_catalog make restore
 ```
 
-`make backup` invokes the application backup task in the running Django
-container. `make restore` requires `catalog.sql`, prompts for confirmation, and
-runs the application restore task.
+`make backup` writes a private, checksummed custom-format dump under
+`private/backups/`. It runs `pg_dump` and validates the result inside the
+PostgreSQL 18 database container, so client and server versions match.
 
-## ES8 cutover
+`make restore` accepts `.dump`, `.sql`, and `.sql.xz` files. It verifies an
+adjacent `.sha256` file when present, restores into a temporary database, runs
+migrations and Django checks there, then swaps database names. The previous
+database is retained under a timestamped name. Search indexes and the
+visualization cache are rebuilt before Django is restarted; a failed
+post-swap validation automatically restores the previous database.
+The restore stops both Django and the scheduler before the database swap and restarts them only after validation succeeds.
 
-ES8 remains a separate, explicitly gated decision. With a deployed release and
-healthy ES8 container, run the single cutover command:
+The `scheduler` service runs the daily maintenance commands and monthly URL validation through cron.
+Its persistent output is `docker/shared/logs/cron.log`.
+Verify installed jobs with `docker compose exec -T scheduler run-parts --test /etc/cron.daily` and the corresponding monthly path.
+
+## Fresh host from a dump
+
+On a clean host, provision credentials, make the immutable image available, and bootstrap the empty database before deploying staging:
 
 ```sh
-CATALOG_IMAGE=<already-deployed-image> CONFIRM_ES8_CUTOVER=1 \
-make es8-cutover ENV=staging
+make config-validate
+CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> \
+CATALOG_ES_HOST=elasticsearch CONFIRM_PRODUCTION_MIGRATION=1 \
+make schema-migrate ENV=staging
+CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> \
+CATALOG_ES_HOST=elasticsearch make deploy ENV=staging
+DUMP=./catalog.sql.xz CONFIRM=comses_catalog make restore
 ```
 
-The command rejects a different image, then runs the foreground ES8 rebuild,
-alias/count/query validation, and the ES8 deployment. It does not accept a
-normal `make deploy` transition from ES6 to ES8. After staging smoke tests,
-promote the same release with `make deploy ENV=prod`; the recorded ES8 endpoint
-is reused. Run the same gated command for prod only when a separate prod
-cutover is intended.
+The restore performs search and visualization rebuilds. Smoke-test staging,
+compare key database and search counts, then promote the recorded release with
+`make deploy ENV=prod`.
 
-The existing direct search routes and ES8 alias/index behavior are unchanged;
-this runbook does not redesign them. Keep ES6 data available while ES6-backed
-rollback remains possible. ES8 index/alias rollback is a separate operational
-decision from application release rollback.
+For an existing deployment moving to Elasticsearch 8, run `make search-rebuild`
+and `make search-validate` immediately after the staging deploy.
+Keep the legacy search volumes until production acceptance is complete.
+The automatic `make rollback` path is supported only between releases using
+this ES8-only Compose definition; an older Solr-dependent image cannot run on
+the new stack.
+Retain the old checkout, rendered Compose file, and legacy volumes until the
+platform migration has been accepted, so an operator can restore that complete
+stack manually if necessary.
 
 ## Legacy migration
 

@@ -23,6 +23,7 @@ from elasticsearch_dsl import Document
 from citation.models import (
     Author,
     Container,
+    ModelDocumentation,
     Platform,
     Publication,
     Sponsor,
@@ -33,6 +34,8 @@ from catalog.core import search_indexes
 from catalog.core.search_indexes import (
     AuthorDoc,
     ContainerDoc,
+    CuratorPublicationDoc,
+    ModelDocumentationDoc,
     PlatformDoc,
     PublicationDoc,
     PublicationDocSearch,
@@ -41,6 +44,7 @@ from catalog.core.search_indexes import (
     TagDoc,
     _index_doc_count,
     build_document_generation,
+    build_curator_publication_search,
     bulk_index_public,
     generation_index_name,
     get_es_client,
@@ -49,7 +53,16 @@ from catalog.core.search_indexes import (
     swap_generation_aliases,
 )
 
-ALL_DOC_CLASSES = (PublicationDoc, AuthorDoc, ContainerDoc, PlatformDoc, SponsorDoc, TagDoc)
+ALL_DOC_CLASSES = (
+    PublicationDoc,
+    CuratorPublicationDoc,
+    AuthorDoc,
+    ContainerDoc,
+    ModelDocumentationDoc,
+    PlatformDoc,
+    SponsorDoc,
+    TagDoc,
+)
 
 
 class ElasticsearchSettingsTest(SimpleTestCase):
@@ -70,18 +83,31 @@ class DocTypePortTest(SimpleTestCase):
 
     def test_stable_read_alias_names(self):
         self.assertEqual(PublicationDoc._index._name, 'publication')
+        self.assertEqual(CuratorPublicationDoc._index._name, 'publication_curator')
         self.assertEqual(AuthorDoc._index._name, 'author')
         self.assertEqual(ContainerDoc._index._name, 'container')
         self.assertEqual(PlatformDoc._index._name, 'platform')
         self.assertEqual(SponsorDoc._index._name, 'sponsor')
         self.assertEqual(TagDoc._index._name, 'tag')
+        self.assertEqual(ModelDocumentationDoc._index._name, 'model_documentation')
 
     def test_generation_index_name_format(self):
         name = generation_index_name('publication')
-        self.assertRegex(name, r'^publication-\d{8}T\d{6}Z$')
+        self.assertRegex(name, r'^publication-\d{8}t\d{12}z$')
 
     def test_publication_index_keeps_single_shard_setting(self):
         self.assertEqual(PublicationDoc._index._settings.get('number_of_shards'), 1)
+
+    def test_publication_docs_match_physical_generation_indices(self):
+        self.assertTrue(PublicationDoc._matches({
+            '_index': 'publication-20260913t120000z',
+        }))
+        self.assertTrue(CuratorPublicationDoc._matches({
+            '_index': 'publication_curator-20260913t120000z',
+        }))
+        self.assertFalse(PublicationDoc._matches({
+            '_index': 'publication_curator-20260913t120000z',
+        }))
 
     def test_all_indices_are_single_node_with_zero_replicas(self):
         for doc_class in ALL_DOC_CLASSES:
@@ -106,7 +132,9 @@ class DocTypePortTest(SimpleTestCase):
         publication = mock.Mock()
         publication.id = 7
         publication.title = 'A Title'
+        publication.abstract = 'A searchable abstract'
         publication.incomplete_date_published = '1994-01'
+        publication.date_published = None
         publication.date_modified = None
         publication.contact_email = 'a@b.c'
         publication.doi = '10.1/example'
@@ -123,7 +151,10 @@ class DocTypePortTest(SimpleTestCase):
         self.assertEqual(action['_id'], 7)
         self.assertEqual(action['_index'], 'publication')
         self.assertEqual(action['_source']['title'], 'A Title')
+        self.assertEqual(action['_source']['abstract'], 'A searchable abstract')
         self.assertEqual(action['_source']['container']['id'], 1)
+        self.assertNotIn('contact_email', action['_source'])
+        self.assertNotIn('has_contact_email', action['_source'])
 
     def test_author_from_instance_shape(self):
         author = mock.Mock()
@@ -138,9 +169,13 @@ class DocTypePortTest(SimpleTestCase):
         self.assertEqual(action['_id'], 3)
         self.assertEqual(action['_index'], 'author')
         self.assertEqual(action['_source']['name'], 'An Author')
+        self.assertNotIn('email', action['_source'])
 
 
 class GetEsClientTest(SimpleTestCase):
+    def setUp(self):
+        search_indexes._ES_CLIENT = None
+
     def tearDown(self):
         search_indexes._ES_CLIENT = None
 
@@ -219,7 +254,7 @@ class BuildDocumentGenerationTest(SimpleTestCase):
         # created on a generation index carrying the doc class mappings
         # and the single-node index settings
         create_kwargs = client.indices.create.call_args.kwargs
-        self.assertRegex(create_kwargs['index'], r'^author-\d{8}T\d{6}Z$')
+        self.assertRegex(create_kwargs['index'], r'^author-\d{8}t\d{12}z$')
         self.assertEqual(index_name, create_kwargs['index'])
         self.assertIn('mappings', create_kwargs['body'])
         self.assertEqual(create_kwargs['body']['settings']['number_of_shards'], 1)
@@ -292,6 +327,37 @@ class BuildDocumentGenerationTest(SimpleTestCase):
         deleted = [c.kwargs['index']
                    for c in client.options.return_value.indices.delete.call_args_list]
         self.assertEqual(deleted, [client.indices.create.call_args.kwargs['index']])
+
+    def test_create_failure_does_not_delete_preexisting_index(self):
+        client = self._client(count_value=1)
+        client.indices.create.side_effect = BadRequestError(
+            'index already exists', meta=None, body=None)
+
+        with self.assertRaises(BadRequestError):
+            build_document_generation(
+                client,
+                AuthorDoc,
+                iter(self._author_actions([1])),
+                expected_count=1,
+            )
+
+        client.options.assert_not_called()
+
+    def test_interrupted_build_deletes_new_generation(self):
+        client = self._client(count_value=1)
+        with mock.patch.object(search_indexes, 'bulk', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                build_document_generation(
+                    client,
+                    AuthorDoc,
+                    iter(self._author_actions([1])),
+                    expected_count=1,
+                )
+
+        client.options.assert_called_once_with(ignore_status=[400, 404])
+        client.options.return_value.indices.delete.assert_called_once_with(
+            index=client.indices.create.call_args.kwargs['index']
+        )
 
 
 class SwapGenerationAliasesTest(SimpleTestCase):
@@ -532,7 +598,7 @@ class BulkIndexPublicTest(SimpleTestCase):
         def values_list(self, *args, **kwargs):
             return self
 
-        def iterator(self):
+        def iterator(self, *args, **kwargs):
             return iter(self)
 
         def count(self):
@@ -555,30 +621,34 @@ class BulkIndexPublicTest(SimpleTestCase):
                 mock.patch.object(search_indexes, 'bulk'), \
                 mock.patch.object(search_indexes.Publication.api, 'primary',
                                   return_value=publications), \
-                mock.patch.object(search_indexes.Author.objects, 'filter', return_value=related), \
-                mock.patch.object(search_indexes.Container.objects, 'filter',
-                                  return_value=related) as container_filter, \
-                mock.patch.object(search_indexes.Platform.objects, 'filter', return_value=related), \
-                mock.patch.object(search_indexes.Sponsor.objects, 'filter', return_value=related), \
-                mock.patch.object(search_indexes.Tag.objects, 'filter', return_value=related):
+                mock.patch.object(search_indexes.Author.objects, 'all', return_value=related), \
+                mock.patch.object(search_indexes.Container.objects, 'all',
+                                  return_value=related) as container_all, \
+                mock.patch.object(search_indexes.ModelDocumentation.objects, 'all',
+                                  return_value=related), \
+                mock.patch.object(search_indexes.Platform.objects, 'all', return_value=related), \
+                mock.patch.object(search_indexes.Sponsor.objects, 'all', return_value=related), \
+                mock.patch.object(search_indexes.Tag.objects, 'all', return_value=related):
             bulk_index_public()
-        # the container documents are actually queried
-        container_filter.assert_called_once_with(publications__id__in=[])
+        container_all.assert_called_once_with()
 
-        # ContainerDoc included: every alias gets its own generation index
+        # Public, curator, and every autocomplete alias are swapped together.
         created = [c.kwargs['index'] for c in client.indices.create.call_args_list]
-        self.assertEqual(len(created), 6)
-        self.assertEqual({name.split('-')[0] for name in created},
-                         {'author', 'container', 'platform', 'sponsor', 'tag', 'publication'})
+        self.assertEqual(len(created), 8)
+        aliases = {name.rsplit('-', 1)[0] for name in created}
+        self.assertEqual(aliases, {
+            'author', 'container', 'model_documentation', 'platform',
+            'sponsor', 'tag', 'publication', 'publication_curator',
+        })
         for index_name in created:
-            self.assertRegex(index_name, r'^[a-z]+-\d{8}T\d{6}Z$')
+            self.assertRegex(index_name, r'^[a-z_]+-\d{8}t\d{12}z$')
 
         # one atomic multi-alias swap, not one swap per class
         self.assertEqual(client.indices.update_aliases.call_count, 1)
         swap_actions = client.indices.update_aliases.call_args.kwargs['actions']
-        self.assertEqual(len(swap_actions), 6)
+        self.assertEqual(len(swap_actions), 8)
         self.assertEqual({a['add']['alias'] for a in swap_actions},
-                         {'author', 'container', 'platform', 'sponsor', 'tag', 'publication'})
+                         aliases)
         for action in swap_actions:
             self.assertNotIn('remove', action)  # no previous generation
         # every add targets one of the freshly created generation indices
@@ -609,8 +679,26 @@ class PublicationDocSearchTest(SimpleTestCase):
         with mock.patch.object(search_indexes, 'get_es_client'):
             self.assertIs(get_search_index(Author), AuthorDoc)
             self.assertIs(get_search_index(Container), ContainerDoc)
+            self.assertIs(get_search_index(ModelDocumentation), ModelDocumentationDoc)
             self.assertIs(get_search_index(Platform), PlatformDoc)
             self.assertIs(get_search_index(Sponsor), SponsorDoc)
             self.assertIs(get_search_index(Tag), TagDoc)
             with self.assertRaises(ValidationError):
                 get_search_index(Publication)
+
+    def test_curator_query_uses_operational_filters(self):
+        search = build_curator_publication_search({
+            'q': 'agent model',
+            'status': Publication.Status.UNREVIEWED,
+            'contact_email': True,
+            'assigned_curator': 'curator',
+            'flagged': 'False',
+            'is_archived': 'True',
+            'tags': ['Agriculture'],
+        })
+        body = search.to_dict()
+        serialized = repr(body)
+        self.assertIn('publication_curator', search._index)
+        self.assertIn('has_contact_email', serialized)
+        self.assertIn('assigned_curator', serialized)
+        self.assertIn('Agriculture', serialized)

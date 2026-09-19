@@ -3,11 +3,12 @@ SHELL := /bin/bash
 COMPOSE ?= docker compose
 FORCE ?= 0
 DEV_OVERRIDE ?= 0
+ALLOW_DIRTY_BUILD ?= 0
 CATALOG_COMPOSE = $(COMPOSE) --project-directory . -p catalog -f docker-compose.yml
 
 .DEFAULT_GOAL := help
 
-.PHONY: help compose-dev compose-staging compose-prod config-generate config-validate bootstrap up down logs shell clean migrations-check test check test-all cite-config cite-build cite-up cite-down cite-test cite-check cite-migrations-check cite-format cite-lock cite-publish image-build image-push release-version deploy schema-migrate rollback status start stop backup restore es8-rebuild es8-validate es8-cutover
+.PHONY: help compose-dev compose-staging compose-prod config-generate config-validate bootstrap up down logs shell clean migrations-check test check test-all cite-config cite-build cite-up cite-down cite-test cite-check cite-migrations-check cite-format cite-lock cite-publish image-build image-push release-version deploy schema-migrate rollback status start stop backup restore search-rebuild search-validate
 
 help:
 	@printf '%s\n' \
@@ -24,14 +25,14 @@ help:
 		'  cite-<target>          Delegate config, build, up, down, test, check, migrations-check, format, lock, or publish to citation/' \
 		'' \
 		'Release commands (single-host Docker Compose, project "catalog";' \
-		'  ENV=staging|prod for deploy/es8-cutover; new deploys require image + ES host;' \
+		'  ENV=staging|prod for deploy; new deploys require image + ES host;' \
 		'  existing release state supplies omitted deploy values for promotion):' \
-		'  image-build | image-push' \
+		'  image-build | image-push (build requires a clean worktree)' \
 		'  deploy | rollback | status | start | stop' \
 		'  schema-migrate        Explicit confirmed database migration (no automatic migrations)' \
 		'                         requires image, ES host, and CONFIRM_PRODUCTION_MIGRATION=1' \
 		'  backup | restore | release-version' \
-		'  es8-rebuild | es8-validate | es8-cutover'
+		'  search-rebuild | search-validate'
 
 compose-dev:
 	DEV_OVERRIDE=$(DEV_OVERRIDE) bash scripts/deploy.sh dev-compose
@@ -83,7 +84,7 @@ cite-build cite-up cite-down cite-test cite-check cite-migrations-check cite-for
 	$(MAKE) -C citation $(@:cite-%=%)
 
 image-build:
-	CATALOG_IMAGE="$(CATALOG_IMAGE)" bash scripts/deploy.sh build
+	CATALOG_IMAGE="$(CATALOG_IMAGE)" ALLOW_DIRTY_BUILD="$(ALLOW_DIRTY_BUILD)" bash scripts/deploy.sh build
 
 image-push:
 	CATALOG_IMAGE="$(CATALOG_IMAGE)" bash scripts/deploy.sh push
@@ -113,16 +114,13 @@ start:
 	bash scripts/deploy.sh start
 
 backup:
-	bash scripts/deploy.sh backup
+	BACKUP_DIR="$(BACKUP_DIR)" COMPOSE_FILE="$(COMPOSE_FILE)" bash scripts/database.sh backup
 
 restore:
-	bash scripts/deploy.sh restore
+	DUMP="$(DUMP)" CONFIRM="$(CONFIRM)" COMPOSE_FILE="$(COMPOSE_FILE)" bash scripts/database.sh restore
 
-es8-rebuild:
-	bash scripts/deploy.sh es8-rebuild
+search-rebuild:
+	$(CATALOG_COMPOSE) run --rm --no-deps django python3 manage.py rebuild_es_index
 
-es8-validate:
-	bash scripts/deploy.sh es8-validate
-
-es8-cutover:
-	CATALOG_IMAGE="$(CATALOG_IMAGE)" CONFIRM_ES8_CUTOVER="$(CONFIRM_ES8_CUTOVER)" bash scripts/deploy.sh es8-cutover "$(ENV)"
+search-validate:
+	$(CATALOG_COMPOSE) run --rm --no-deps django python3 manage.py validate_search_indexes

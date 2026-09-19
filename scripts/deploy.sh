@@ -39,11 +39,9 @@ release_state_file="${state_dir}/release.env"
 production_anchor_file="${state_dir}/production-rollback.env"
 # Override the history log location with DEPLOY_HISTORY_FILE.
 deploy_history_file="${DEPLOY_HISTORY_FILE:-${state_dir}/deploy-history.log}"
-# Valid per-release ES endpoints (service names from base.yml).
-# Every release must pick one explicitly; there is no default:
-#   elasticsearch  = Elasticsearch 6.6.2
-#   elasticsearch8 = Elasticsearch 8.15.5 (gated cutover, see runbook)
-es_hosts=(elasticsearch elasticsearch8)
+# Valid per-release Elasticsearch endpoint (service name from base.yml).
+# Every release records it explicitly so release state remains self-contained.
+es_hosts=(elasticsearch)
 
 die() {
     echo "ERROR: $*" >&2
@@ -133,6 +131,28 @@ require_config() {
     bash scripts/config.sh validate
 }
 
+prepare_host_directories() {
+    local directory
+    for directory in \
+        docker/shared/catalog/logs \
+        docker/shared/logs \
+        docker/shared/nginx/logs; do
+        mkdir -p "${directory}" \
+            || die "cannot create ${directory}; fix ownership of docker/shared and retry"
+        [[ -w "${directory}" ]] \
+            || die "${directory} is not writable; fix ownership and retry"
+    done
+}
+
+require_clean_build_context() {
+    if [[ "${ALLOW_DIRTY_BUILD:-0}" == 1 ]]; then
+        echo "WARNING: building from a dirty worktree; release version will include -dirty" >&2
+        return 0
+    fi
+    [[ -z "$(git status --porcelain --untracked-files=normal)" ]] \
+        || die "worktree is dirty; commit release changes first, or set ALLOW_DIRTY_BUILD=1 for a rehearsal image"
+}
+
 validate_image_ref() {
     local ref="$1"
     [[ -n "${ref}" ]] || die "CATALOG_IMAGE is required (use an explicit tag or sha256 digest)"
@@ -151,7 +171,7 @@ validate_image_ref() {
 
 validate_es_host() {
     local host="$1" known
-    [[ -n "${host}" ]] || die "CATALOG_ES_HOST is required (elasticsearch or elasticsearch8)"
+    [[ -n "${host}" ]] || die "CATALOG_ES_HOST is required (elasticsearch)"
     for known in "${es_hosts[@]}"; do
         [[ "${host}" == "${known}" ]] && return 0
     done
@@ -238,12 +258,20 @@ verify_database_ready() {
         || die "database is not ready"
 }
 
-restore_after_persistence_failure() {
-    local runtime_backup="$1" root_backup="$2" state_backup="$3" anchor_backup="$4" history_backup="$5" candidate="$6"
+verify_running_stack() {
+    compose exec -T nginx nginx -t >/dev/null \
+        || return 1
+    compose exec -T django \
+        curl -fsS -H 'Host: localhost' http://nginx/ >/dev/null \
+        || return 1
+}
+
+restore_after_deploy_failure() {
+    local reason="$1" runtime_backup="$2" root_backup="$3" state_backup="$4" anchor_backup="$5" history_backup="$6" candidate="$7"
     local runtime_ok=0
     if [[ -n "${runtime_backup}" ]]; then
         compose_file="${runtime_backup}"
-        if compose up -d --no-build --wait; then
+        if compose up -d --no-build --wait --remove-orphans; then
             runtime_ok=1
         fi
     else
@@ -255,9 +283,9 @@ restore_after_persistence_failure() {
     restore_deployment_state "${root_backup}" "${state_backup}" "${anchor_backup}" "${history_backup}"
     rm -f "${runtime_backup}" "${root_backup}" "${state_backup}" "${anchor_backup}" "${history_backup}"
     if [[ "${runtime_ok}" == 1 ]]; then
-        die "post-start metadata persistence failed; previous runtime and deployment files were restored"
+        die "${reason}; previous runtime and deployment files were restored"
     fi
-    die "post-start metadata persistence failed and runtime recovery failed; deployment files were restored where possible, manual intervention is required"
+    die "${reason}; runtime recovery failed, deployment files were restored where possible, and manual intervention is required"
 }
 
 host_is_fresh() {
@@ -277,6 +305,7 @@ schema_migrate() {
     validate_es_host "${CATALOG_ES_HOST}"
     require_docker
     require_config
+    prepare_host_directories
 
     if [[ -s "${release_state_file}" ]]; then
         require_release_state
@@ -286,9 +315,6 @@ schema_migrate() {
         operational_compose="${compose_file}"
     else
         die "no tracked release state on a non-fresh host; refusing schema migration"
-    fi
-    if [[ "${CATALOG_ES_HOST}" == elasticsearch8 && ( "${fresh_host}" == 1 || "${release_es_host}" != elasticsearch8 ) ]]; then
-        die "ES8 schema migration is gated; use make es8-cutover after the ES8 rebuild and validation"
     fi
     ensure_image_resolvable
     if [[ "${fresh_host}" == 0 ]]; then
@@ -340,10 +366,7 @@ deploy_release() {
     fi
 
     preflight
-
-    if [[ "${CATALOG_ES_HOST:-}" == elasticsearch8 && "${release_es_host}" != elasticsearch8 && "${ES8_CUTOVER:-0}" != 1 ]]; then
-        die "ES6 to ES8 is a gated transition; use make es8-cutover ENV=${environment}"
-    fi
+    prepare_host_directories
 
     if [[ -s "${compose_file}" && -s "${legacy_compose_file}" ]]; then
         die "both ${compose_file} and ${legacy_compose_file} exist; resolve the deployment conflict before deploying"
@@ -378,18 +401,18 @@ deploy_release() {
     compose run --rm --no-deps django python3 manage.py migrate --check \
         || die "pending database migrations; run explicit make schema-migrate before deploying"
 
-    mkdir -p docker/shared/catalog/logs docker/shared/nginx/logs
-
-    # solr is the only service still defined with a `build:` section
-    # (comses/catalog/solr:6.6 is not published to any registry); build it
-    # locally if it's missing or stale so `up --no-build` below never tries
-    # to pull it. This never touches the django image, which is pinned via
-    # `image: ${CATALOG_IMAGE}` with no build section.
-    compose build solr
-
     # Reconcile the single-host stack: changed services are recreated as
-    # needed; platform services and all named volumes stay untouched.
-    compose up -d --no-build --wait
+    # needed, legacy service containers are removed, and named volumes stay.
+    if ! compose up -d --no-build --wait --remove-orphans; then
+        restore_after_deploy_failure "deployment startup failed" \
+            "${previous_runtime}" "${previous_root}" "${previous_state}" \
+            "${previous_anchor}" "${previous_history}" "${candidate}"
+    fi
+    if ! verify_running_stack; then
+        restore_after_deploy_failure "post-deploy HTTP health check failed" \
+            "${previous_runtime}" "${previous_root}" "${previous_state}" \
+            "${previous_anchor}" "${previous_history}" "${candidate}"
+    fi
 
     mv "${candidate}" "${PWD}/docker-compose.yml"
     # Preserve the prior production tuple before generic release metadata is
@@ -397,16 +420,22 @@ deploy_release() {
     # later promotion can roll back to that immediately prior prod release.
     if [[ "${release_env}" == prod ]]; then
         if ! write_production_anchor prod "${release_image}" "${release_es_host}"; then
-            restore_after_persistence_failure "${previous_runtime}" "${previous_root}" "${previous_state}" "${previous_anchor}" "${previous_history}" "${root_compose_file}"
+            restore_after_deploy_failure "post-start metadata persistence failed" \
+                "${previous_runtime}" "${previous_root}" "${previous_state}" \
+                "${previous_anchor}" "${previous_history}" "${root_compose_file}"
         fi
     fi
     if ! write_release_state "${environment}" "${CATALOG_IMAGE}" "${CATALOG_ES_HOST}" \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "${release_env}" "${release_image}" "${release_es_host}"; then
-        restore_after_persistence_failure "${previous_runtime}" "${previous_root}" "${previous_state}" "${previous_anchor}" "${previous_history}" "${root_compose_file}"
+        restore_after_deploy_failure "post-start metadata persistence failed" \
+            "${previous_runtime}" "${previous_root}" "${previous_state}" \
+            "${previous_anchor}" "${previous_history}" "${root_compose_file}"
     fi
     if ! append_history "${environment}"; then
-        restore_after_persistence_failure "${previous_runtime}" "${previous_root}" "${previous_state}" "${previous_anchor}" "${previous_history}" "${root_compose_file}"
+        restore_after_deploy_failure "post-start metadata persistence failed" \
+            "${previous_runtime}" "${previous_root}" "${previous_state}" \
+            "${previous_anchor}" "${previous_history}" "${root_compose_file}"
     fi
     rm -f "${legacy_compose_file}"
     rm -f "${previous_root}" "${previous_state}" "${previous_anchor}" "${previous_history}"
@@ -460,7 +489,7 @@ rollback() {
     validate_image_ref "${anchor_image}"
     validate_es_host "${anchor_es_host}"
     echo "Rolling back to env=prod image=${anchor_image} es_host=${anchor_es_host}"
-    ES8_CUTOVER=1 CATALOG_IMAGE="${anchor_image}" CATALOG_ES_HOST="${anchor_es_host}" \
+    CATALOG_IMAGE="${anchor_image}" CATALOG_ES_HOST="${anchor_es_host}" \
         deploy_release prod
 }
 
@@ -488,83 +517,6 @@ start_stack() {
     # Bring the last rendered release back up without re-rendering or
     # touching the release state.
     compose up -d --no-build --wait
-}
-
-backup_database() {
-    require_docker
-    require_compose_file
-    local container_id
-    container_id="$(compose ps -q django | head -n 1)"
-    [[ -n "${container_id}" ]] \
-        || die "no running django container; start the stack first (make start or make deploy)"
-    echo "Creating database backup via invoke backup"
-    compose exec -T django invoke backup
-}
-
-restore_database() {
-    require_docker
-    require_compose_file
-    [[ -s catalog.sql ]] || die "catalog.sql is missing from the working directory"
-    read -r -p 'Restore from catalog.sql (y/N) ' restore_confirm
-    [[ "${restore_confirm}" =~ ^[Yy]([Ee][Ss])?$ ]] || return 0
-    local container_id
-    container_id="$(compose ps -q django | head -n 1)"
-    [[ -n "${container_id}" ]] \
-        || die "no running django container; start the stack first (make start or make deploy)"
-    echo "Copying catalog.sql to the django container"
-    docker cp catalog.sql "${container_id}:/code"
-    echo "Restoring database"
-    compose exec -T django invoke restore-from-dump
-}
-
-es8_rebuild() {
-    require_docker
-    require_compose_file
-    # Fail early when ES8 itself is not healthy.
-    compose exec -T elasticsearch8 curl -fsS http://localhost:9200/_cluster/health >/dev/null \
-        || die "Elasticsearch 8 is not healthy; check the elasticsearch8 container before rebuilding"
-    # One-off Compose container from the deployed django image, pointed at
-    # ES8: the command reads ELASTICSEARCH_HOST/ELASTICSEARCH_PORT, and the
-    # running release may still be on ES6 - that does not matter, this only
-    # talks to ES8 and Postgres. Foreground: a clean exit means success, a
-    # nonzero exit means failure (output is streamed to this terminal; the
-    # --rm container leaves nothing behind).
-    compose run --rm --no-deps \
-        -e ELASTICSEARCH_HOST=elasticsearch8 \
-        -e ELASTICSEARCH_PORT=9200 \
-        django python3 manage.py rebuild_es_index
-    echo "ES8 rebuild finished successfully. Run make es8-validate before switching any release to ES8."
-}
-
-es8_validate() {
-    require_docker
-    require_compose_file
-    local alias index_count database_count
-    for alias in publication author container platform sponsor tag; do
-        compose exec -T elasticsearch8 curl -fsS "http://localhost:9200/_alias/${alias}" >/dev/null \
-            || die "ES8 read alias '${alias}' is missing; run make es8-rebuild first"
-    done
-    index_count="$(compose exec -T elasticsearch8 curl -fsS http://localhost:9200/publication/_count | sed -n 's/.*"count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
-    database_count="$(compose exec -T django python3 manage.py shell -c "from citation.models import Publication; print(Publication.api.primary().filter(status='REVIEWED').count())")"
-    [[ "${index_count}" == "${database_count}" ]] \
-        || die "publication count mismatch: ES8=${index_count:-unknown}, database=${database_count:-unknown}"
-    compose exec -T elasticsearch8 curl -fsS -H 'Content-Type: application/json' \
-        -d '{"size":1,"query":{"match_all":{}}}' http://localhost:9200/publication/_search >/dev/null
-    echo "ES8 aliases, publication counts, and query validation succeeded"
-}
-
-es8_cutover() {
-    local environment="$1"
-    [[ "${CONFIRM_ES8_CUTOVER:-}" == 1 ]] || die "set CONFIRM_ES8_CUTOVER=1 to continue"
-    validate_environment "${environment}"
-    require_release_state
-    if [[ -n "${CATALOG_IMAGE:-}" && "${CATALOG_IMAGE}" != "${release_image}" ]]; then
-        die "CATALOG_IMAGE must exactly match the already deployed release (${release_image})"
-    fi
-    CATALOG_IMAGE="${release_image}"
-    es8_rebuild
-    es8_validate
-    ES8_CUTOVER=1 CATALOG_IMAGE="${release_image}" CATALOG_ES_HOST=elasticsearch8 deploy_release "${environment}"
 }
 
 dev_compose() {
@@ -596,6 +548,7 @@ build_image() {
     # same Dockerfile, build arg, and context that staging.yml declares,
     # tagged with the requested immutable reference.
     validate_image_ref "${CATALOG_IMAGE:-}"
+    require_clean_build_context
     # Release-version metadata (release-version.txt) is generated as part
     # of the build, as in the legacy build flow.
     tag_release
@@ -615,7 +568,7 @@ push_image() {
 }
 
 tag_release() {
-    git describe --tags --always > release-version.txt
+    git describe --tags --always --dirty > release-version.txt
 }
 
 case "${1:-}" in
@@ -628,14 +581,9 @@ case "${1:-}" in
     status) status ;;
     stop) stop_stack ;;
     start) start_stack ;;
-    backup) backup_database ;;
-    restore) restore_database ;;
-    es8-rebuild) es8_rebuild ;;
-    es8-validate) es8_validate ;;
-    es8-cutover) es8_cutover "${2:?environment required (staging or prod)}" ;;
     schema-migrate) schema_migrate "${2:?environment required (staging or prod)}" ;;
     dev-compose) dev_compose ;;
     existing-compose) existing_compose ;;
     logs) logs_stack ;;
-    *) die "usage: $0 <build|push|tag|preflight|deploy|schema-migrate|rollback|status|stop|start|backup|restore|es8-rebuild|es8-validate|es8-cutover>" ;;
+    *) die "usage: $0 <build|push|tag|preflight|deploy|schema-migrate|rollback|status|stop|start|dev-compose|existing-compose|logs>" ;;
 esac
