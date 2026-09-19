@@ -60,4 +60,30 @@ class RebuildEsIndexCommandTest(SimpleTestCase):
         with mock.patch(PATCH_TARGET):
             call_command('rebuild_es_index', stdout=out)
         # the success line is written to stdout, not stderr
-        self.assertIn('Public search indices', out.getvalue())
+        self.assertIn('Public and curator search indices', out.getvalue())
+
+
+class ValidateSearchIndexesCommandTest(SimpleTestCase):
+    patch_target = (
+        'catalog.core.management.commands.validate_search_indexes.'
+        'validate_search_indices')
+
+    def test_success_reports_validated_counts(self):
+        out = StringIO()
+        with mock.patch(self.patch_target, return_value={
+            'publication': 7,
+            'publication_curator': 9,
+        }) as validate:
+            call_command('validate_search_indexes', stdout=out)
+
+        validate.assert_called_once_with()
+        self.assertIn('publication=7', out.getvalue())
+        self.assertIn('publication_curator=9', out.getvalue())
+
+    def test_failure_raises_command_error(self):
+        failure = SearchRebuildError("search alias 'publication' is missing")
+        with mock.patch(self.patch_target, side_effect=failure):
+            with self.assertRaises(CommandError) as ctx:
+                call_command('validate_search_indexes')
+
+        self.assertIs(ctx.exception.__cause__, failure)

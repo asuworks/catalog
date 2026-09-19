@@ -3,15 +3,16 @@ FROM python:3.12-slim AS base
 ARG RUN_SCRIPT=./deploy/docker/dev.sh
 
 # OS-level operational tooling preserved from the legacy Focal image:
-# Mail relay, Postgres client tools, and git/curl for ops. The legacy
+# mail relay plus git/curl for ops. PostgreSQL maintenance uses the
+# version-matched tools in the database container. The legacy
 # build toolchain (libpq-dev, libxml2-dev, python3-dev, python3-pip,
 # python3-setuptools) is no longer needed: the locked uv environment
 # installs prebuilt wheels only.
 RUN apt-get update \
     && apt-get install --no-install-recommends -q -y \
+        cron \
         curl \
         git \
-        postgresql-client \
         ssmtp \
     && rm -rf /var/lib/apt/lists/*
 
@@ -35,7 +36,7 @@ RUN uv sync --locked --no-dev
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY deploy/mail/ssmtp.conf /etc/ssmtp/ssmtp.conf
-# copy cron script to be run daily
+# Install maintenance jobs for the dedicated scheduler service.
 COPY deploy/cron/daily_catalog_tasks /etc/cron.daily/
 COPY deploy/cron/monthly_catalog_tasks /etc/cron.monthly/
 # Gunicorn socket dir (staging/prod also mount a named volume at this path)

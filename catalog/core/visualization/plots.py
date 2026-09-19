@@ -148,10 +148,9 @@ def code_availability_timeseries_plot(publication_df: pd.DataFrame, publication_
 def archival_timeseries_plot(publication_df: pd.DataFrame, code_archive_urls_df: pd.DataFrame, publication_pks):
     matching_publication_df = publication_df.loc[publication_df.index.intersection(publication_pks)]
     year_published_index = pd.RangeIndex(1990.0, publication_df['year_published'].max() + 1.0)
-    year_counts_df = matching_publication_df \
-        .groupby(['year_published'])[['year_published']] \
-        .count() \
-        .rename(columns={'year_published': ('publications', 'count')}) \
+    year_counts = matching_publication_df \
+        .groupby('year_published') \
+        .size() \
         .reindex(year_published_index) \
         .fillna(0.0)
     df = matching_publication_df \
@@ -160,8 +159,8 @@ def archival_timeseries_plot(publication_df: pd.DataFrame, code_archive_urls_df:
         .count() \
         .unstack('category') \
         .reindex(year_published_index) \
-        .fillna(0.0) \
-        .join(year_counts_df)
+        .fillna(0.0)
+    df[('publications', 'count')] = year_counts
 
     df_percent = df.apply(lambda x: x / x[('publications', 'count')], axis=1)['category'].fillna(0.0)
 

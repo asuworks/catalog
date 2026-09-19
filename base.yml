@@ -3,31 +3,6 @@
 # below so volumes and the network keep their `catalog_*` identities).
 name: catalog
 services:
-  solr:
-    build:
-      context: ./
-      dockerfile: ./deploy/images/solr.Dockerfile
-    entrypoint:
-      - docker-entrypoint.sh
-      - solr-precreate
-      - catalog_core
-      - /catalog-solr-conf
-    image: comses/catalog/solr:6.6
-    restart: always
-    # JVM tuning shared by all environments (previously a swarm config in
-    # staging.yml and a bind mount in dev.yml; the file is the same either
-    # way, so it lives here).
-    volumes:
-      - solr:/opt/solr/server/solr/mycores
-      - ./deploy/solr/init.d/solr.in.sh:/opt/solr/bin/solr.in.sh
-    healthcheck:
-      # The solr image ships wget (no curl); the cores API answers 200
-      # only once the core is up and serving.
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8983/solr/admin/cores || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 60s
   redis:
     image: redis:8.10.1
     restart: always
@@ -38,37 +13,9 @@ services:
       retries: 5
       start_period: 5s
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:6.6.2
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.21
     environment:
-      - cluster.name=docker-cluster
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    cap_add:
-      - IPC_LOCK
-    restart: always
-    # discovery.zen.minimum_master_nodes=1 in the mounted config file makes
-    # this a valid single-node cluster (the swarm multi-node discovery env
-    # vars are gone with the swarm deployment).
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 40s
-    volumes:
-      - ./deploy/elasticsearch.conf.d/log4j2.properties:/usr/share/elasticsearch/config/log4j2.properties
-      - ./deploy/elasticsearch.conf.d/elasticsearch-dev.yml:/usr/share/elasticsearch/config/elasticsearch.yml
-      - esdata:/usr/share/elasticsearch/data
-  elasticsearch8:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.5
-    environment:
-      - cluster.name=docker-cluster8
+      - cluster.name=catalog-search
       - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
     ulimits:
       memlock:
@@ -88,6 +35,8 @@ services:
       start_period: 40s
     volumes:
       - ./deploy/elasticsearch.conf.d/elasticsearch8.yml:/usr/share/elasticsearch/config/elasticsearch.yml
+      # Never attach Elasticsearch 8 to the legacy ES6 data volume. Search data
+      # is rebuilt from PostgreSQL into this separate volume.
       - esdata8:/usr/share/elasticsearch/data
   db:
     image: postgres:18
@@ -108,7 +57,6 @@ services:
       start_period: 10s
   django:
     volumes:
-      - solr:/etc/solr/mycores/
       - ./docker/shared:/shared
     environment:
       DJANGO_SETTINGS_MODULE: 'catalog.settings.prod'
@@ -117,32 +65,17 @@ services:
       DB_HOST: db
       DB_NAME: comses_catalog
       DB_PORT: 5432
-      SOLR_HOST: solr
-      SOLR_PORT: 8983
-      SOLR_CORE_NAME: catalog_core
-      ELASTICSEARCH_HOST: elasticsearch8
+      ELASTICSEARCH_HOST: elasticsearch
     secrets:
       - catalog_django_config
-    # Required dependencies only. Elasticsearch is deliberately not here:
-    # the endpoint is per-environment (dev pins elasticsearch8 in
-    # dev.yml; a staging/prod release selects CATALOG_ES_HOST at render
-    # time, and Compose cannot pick a depends_on service name from a
-    # variable). The selected endpoint is waited on exactly where the
-    # value is known: dev.yml's dependency gate and
-    # deploy/docker/prod.sh's wait-for-it (ELASTICSEARCH_HOST), so a
-    # release never blocks on the ES version it does not use.
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-      solr:
+      elasticsearch:
         condition: service_healthy
 volumes:
-  solr:
-    driver: local
-  esdata:
-    driver: local
   esdata8:
     driver: local
   static:
