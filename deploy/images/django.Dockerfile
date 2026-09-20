@@ -1,6 +1,15 @@
-FROM python:3.12-slim AS base
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS base
 
 ARG RUN_SCRIPT=./deploy/docker/dev.sh
+ARG CATALOG_REVISION=unknown
+ARG CITATION_REVISION=unknown
+ARG CATALOG_SOURCE=https://github.com/comses/catalog
+ARG CATALOG_VERSION=unknown
+
+LABEL org.opencontainers.image.source="${CATALOG_SOURCE}" \
+      org.opencontainers.image.revision="${CATALOG_REVISION}" \
+      org.opencontainers.image.version="${CATALOG_VERSION}" \
+      org.comses.catalog.citation-revision="${CITATION_REVISION}"
 
 # OS-level operational tooling preserved from the legacy Focal image:
 # mail relay plus git/curl for ops. PostgreSQL maintenance uses the

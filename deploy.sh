@@ -9,9 +9,10 @@ cat >&2 <<'EOF'
 ERROR: ./deploy.sh is deprecated and no longer executes deployments.
 
 Use the documented Make commands instead:
-  make deploy ENV=staging|prod CATALOG_IMAGE=... CATALOG_ES_HOST=...
-  make rollback | make status | make start | make stop
+  make candidate IMAGE=name@sha256:digest BUNDLE_REVISION=git-sha
+  make backup | make restore | make schema-migrate | make data-rebuild
+  make deploy | make rollback | make recover
+  make status | make release-report | make start | make stop | make logs
   make image-build | make image-push | make release-version
-  make backup | make restore
 EOF
 exit 1

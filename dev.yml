@@ -1,5 +1,7 @@
 services:
   db:
+    volumes:
+      - ./docker/pgdata:/var/lib/postgresql
     ports:
       - "127.0.0.1:5437:5432"
   elasticsearch:

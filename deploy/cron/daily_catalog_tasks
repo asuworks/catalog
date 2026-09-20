@@ -1,3 +1,14 @@
-/code/manage.py flagged_faulty_data_publication >> /var/log/cron.log 2>&1
-/code/manage.py cache_data >> /var/log/cron.log 2>&1
-/code/manage.py remove_orphans >> /var/log/cron.log 2>&1
+#!/bin/sh
+
+set -u
+
+# shellcheck source=/dev/null
+. /run/catalog-scheduler.env
+
+status=0
+{
+    /opt/venv/bin/python3 /code/manage.py flagged_faulty_data_publication || status=$?
+    /opt/venv/bin/python3 /code/manage.py cache_data || status=$?
+    /opt/venv/bin/python3 /code/manage.py remove_orphans || status=$?
+} >> /shared/logs/cron.log 2>&1
+exit "${status}"
