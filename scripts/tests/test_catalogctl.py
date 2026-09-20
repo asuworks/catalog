@@ -20,6 +20,29 @@ sys.modules[SPEC.name] = catalogctl
 SPEC.loader.exec_module(catalogctl)
 
 
+class RunnerTestCase(unittest.TestCase):
+    def test_run_uses_devnull_when_no_input_is_supplied(self) -> None:
+        with mock.patch.object(subprocess, "run") as run:
+            catalogctl.Runner().run(["example"])
+
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_run_preserves_explicit_input(self) -> None:
+        with mock.patch.object(subprocess, "run") as run:
+            catalogctl.Runner().run(["example"], input_data="payload")
+
+        self.assertIsNone(run.call_args.kwargs["stdin"])
+        self.assertEqual(run.call_args.kwargs["input"], "payload")
+
+    def test_to_file_uses_devnull(self) -> None:
+        destination = mock.Mock()
+        with mock.patch.object(subprocess, "run") as run:
+            catalogctl.Runner().to_file(["example"], destination)
+
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(run.call_args.kwargs["stdout"], destination)
+
+
 class ControllerTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

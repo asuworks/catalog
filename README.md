@@ -46,5 +46,5 @@ Staging and production run on separate Docker hosts.
 CI publishes one application image, and both hosts deploy the exact same `name@sha256:<digest>` candidate independently.
 Tags are never accepted as deployment input.
 
-Follow [the pre-release checklist](docs/pre-release-testing.md) for the complete local, staging, and production sequence.
-Use [the deployment runbook](docs/deployment-runbook.md) for provisioning, state locations, backup, restore, rollback, and recovery details.
+Follow [the release and deployment runbook](docs/deployment-runbook.md) for regular releases, first deployments, rollback, and recovery.
+Use [the deployment acceptance guide](docs/deployment-acceptance-testing.md) only to validate the release machinery on personal forks and disposable hosts.

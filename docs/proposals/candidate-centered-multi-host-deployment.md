@@ -1,6 +1,10 @@
 # Candidate-centered multi-host deployment
 
-**Status:** Implemented and accepted through fork workflows and independent staging and production VM rehearsals.
+**Status:** Implemented and validated through fork workflows and independent staging and production VM rehearsals.
+Upstream maintainer review and deployment on the real staging and production hosts remain pending.
+
+This document records the design and is not an operator procedure.
+Use [the release and deployment runbook](../deployment-runbook.md) for real releases and [the deployment acceptance guide](../deployment-acceptance-testing.md) for disposable-host validation.
 
 This design gives Catalog one build artifact, an explicit human QA boundary, and independent staging and production hosts.
 The implementation is intentionally Docker Compose based and does not attempt zero-downtime deployment.

@@ -317,6 +317,7 @@ class Runner:
             cwd=cwd,
             env=env,
             input=input_data,
+            stdin=subprocess.DEVNULL if input_data is None else None,
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE if capture else None,
             check=check,
@@ -330,7 +331,13 @@ class Runner:
         *,
         cwd: Path | None = None,
     ) -> None:
-        subprocess.run(command, cwd=cwd, stdout=destination, check=True)
+        subprocess.run(
+            command,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=destination,
+            check=True,
+        )
 
     def from_file(
         self,
