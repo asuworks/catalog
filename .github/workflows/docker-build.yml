@@ -2,63 +2,125 @@ name: CoMSES Docker CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
-
-  build:
-
+  build-test-publish:
     runs-on: ubuntu-latest
+    env:
+      CATALOG_IMAGE: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+      CATALOG_SOURCE: ${{ github.server_url }}/${{ github.repository }}
 
     steps:
-    - name: Checkout repo + submodules
-      # actions/checkout v7.0.1, pinned to a full commit SHA.
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      with:
-        submodules: recursive
-    - name: Prepare development stack
-      # Renders the dev Compose config (validating base.yml + dev.yml)
-      # and generates the local credentials the staging/prod renderings
-      # reference as file-based secrets.
-      run: make bootstrap
-    - name: Validate staging/prod Compose rendering
-      # The deploy contract requires an immutable CATALOG_IMAGE and an
-      # explicit CATALOG_ES_HOST for every staging/prod rendering
-      # (staging.yml uses ${CATALOG_ES_HOST:?...}); provide both, assert
-      # the rendered stack, and assert that rendering fails without the
-      # required ES host (there must be no silent default).
-      env:
-        CATALOG_IMAGE: comses/catalog/ci:ci-${{ github.sha }}
-        CATALOG_ES_HOST: elasticsearch8
-      run: |
-        bash scripts/compose.sh staging /tmp/catalog-ci-staging.yml
-        grep -q "image: ${CATALOG_IMAGE}" /tmp/catalog-ci-staging.yml
-        grep -q "ELASTICSEARCH_HOST: ${CATALOG_ES_HOST}" /tmp/catalog-ci-staging.yml
-        grep -q "DOMAIN_NAME: staging-catalog.comses.net" /tmp/catalog-ci-staging.yml
-        bash scripts/compose.sh prod /tmp/catalog-ci-prod.yml
-        grep -q "image: ${CATALOG_IMAGE}" /tmp/catalog-ci-prod.yml
-        grep -q "ELASTICSEARCH_HOST: ${CATALOG_ES_HOST}" /tmp/catalog-ci-prod.yml
-        grep -q "DOMAIN_NAME: catalog.comses.net" /tmp/catalog-ci-prod.yml
-        if env -u CATALOG_ES_HOST bash scripts/compose.sh staging; then
-          echo "ERROR: staging rendering must fail without CATALOG_ES_HOST" >&2
-          exit 1
-        fi
-    - name: Build production image
-      # Exercises the release build path end to end: immutable reference
-      # validation, release-version metadata generation, and a direct
-      # docker build of the django image with the production RUN_SCRIPT
-      # (Gunicorn runtime) — independent of any Compose rendering — then
-      # verifies the Gunicorn runtime is in the built image. Building
-      # needs only a plain Docker daemon.
-      env:
-        CATALOG_IMAGE: comses/catalog/ci:ci-${{ github.sha }}
-        CATALOG_ES_HOST: elasticsearch8
-      run: |
-        bash scripts/deploy.sh build
-        docker run --rm "${CATALOG_IMAGE}" gunicorn --version
-    - name: Run Django tests
-      # test.sh runs the migration gate (invoke check-migrations) before
-      # the suite, so there is no separate makemigrations --check step.
-      run: make test
+      - name: Checkout Catalog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Checkout pinned Citation revision
+        env:
+          CITATION_OWNER: ${{ github.event.pull_request.head.repo.owner.login || github.repository_owner }}
+        run: bash scripts/checkout-citation.sh "${CITATION_OWNER}"
+
+      - name: Prepare development stack
+        run: make bootstrap cite-config
+
+      - name: Validate scripts and deployment controller
+        run: |
+          scripts=(
+            scripts/compose.sh
+            scripts/deploy.sh
+            scripts/database.sh
+            scripts/dev-restore.sh
+            scripts/checkout-citation.sh
+            deploy/docker/prod.sh
+            deploy/docker/scheduler.sh
+            deploy/cron/daily_catalog_tasks
+            deploy/cron/monthly_catalog_tasks
+          )
+          bash -n "${scripts[@]}"
+          shellcheck "${scripts[@]}"
+          python3 -m py_compile scripts/catalogctl.py scripts/tests/test_catalogctl.py
+          make deploy-controller-test
+
+      - name: Validate deployment Compose files
+        env:
+          CATALOG_BUNDLE_REVISION: ${{ github.sha }}
+          CATALOG_CONFIG_DIR: ${{ github.workspace }}/deploy/conf
+          CATALOG_SHARED_DIR: /var/lib/comses-catalog/shared
+          CATALOG_BUNDLE_DIR: ${{ github.workspace }}
+          CATALOG_HTTP_BIND: 127.0.0.1:80
+        run: |
+          CATALOG_ENV=staging CATALOG_DOMAIN=staging-catalog.comses.net \
+            bash scripts/compose.sh staging /tmp/catalog-staging.yml
+          CATALOG_ENV=prod CATALOG_DOMAIN=catalog.comses.net \
+            bash scripts/compose.sh prod /tmp/catalog-prod.yml
+          docker compose -f /tmp/catalog-staging.yml config --quiet
+          docker compose -f /tmp/catalog-prod.yml config --quiet
+          grep -q 'catalog.settings.staging' /tmp/catalog-staging.yml
+          grep -q 'catalog.settings.prod' /tmp/catalog-prod.yml
+
+      - name: Run application checks and tests
+        run: make check migrations-check cite-check cite-migrations-check test-all
+
+      - name: Build and inspect production image
+        run: |
+          make image-build
+          docker run --rm "${CATALOG_IMAGE}" gunicorn --version
+          test "$(docker image inspect "${CATALOG_IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${GITHUB_SHA}"
+          test "$(docker image inspect "${CATALOG_IMAGE}" --format '{{index .Config.Labels "org.comses.catalog.citation-revision"}}')" = "$(git rev-parse HEAD:citation)"
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "${GHCR_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Publish immutable candidate and handoff
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          make image-push | tee /tmp/catalog-image-push.log
+          digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' /tmp/catalog-image-push.log | tail -n 1)"
+          test -n "${digest}"
+          image_name="${CATALOG_IMAGE%:*}"
+          image_digest="${image_name}@${digest}"
+          docker pull "${image_digest}"
+          test "$(docker image inspect "${image_digest}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${GITHUB_SHA}"
+          python3 - "${image_digest}" "${GITHUB_SHA}" "$(git rev-parse HEAD:citation)" <<'PY'
+          import json
+          import sys
+
+          image, catalog_revision, citation_revision = sys.argv[1:]
+          with open("release-handoff.json", "w", encoding="utf-8") as output:
+              json.dump(
+                  {
+                      "schema_version": 1,
+                      "image": image,
+                      "bundle_revision": catalog_revision,
+                      "citation_revision": citation_revision,
+                      "workflow_run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+                  },
+                  output,
+                  indent=2,
+                  sort_keys=True,
+              )
+              output.write("\n")
+          PY
+          cat release-handoff.json >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload release handoff
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: catalog-candidate-${{ github.sha }}
+          path: release-handoff.json
+          if-no-files-found: error
+          retention-days: 30

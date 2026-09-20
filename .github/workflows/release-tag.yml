@@ -1,0 +1,71 @@
+name: Publish release tag
+
+on:
+  push:
+    tags:
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9]'
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9]*'
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9]-rc.[0-9]*'
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9]*-rc.[0-9]*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  alias-tested-image:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Verify annotated release tag on main
+        id: release
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          [[ "${tag}" =~ ^v[0-9]{4}\.[0-9]{2}(\.[0-9]+)?(-rc\.[0-9]+)?$ ]]
+          test "$(git cat-file -t "${GITHUB_REF}")" = tag
+          revision="$(git rev-list -n 1 "${GITHUB_REF}")"
+          git fetch origin main
+          git merge-base --is-ancestor "${revision}" origin/main
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "revision=${revision}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "${GHCR_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Alias the tested image without rebuilding
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          REVISION: ${{ steps.release.outputs.revision }}
+        run: |
+          image_name="ghcr.io/${GITHUB_REPOSITORY}"
+          source_image="${image_name}:sha-${REVISION}"
+          release_image="${image_name}:${TAG}"
+          docker pull "${source_image}"
+          source_ref="$(docker image inspect "${source_image}" --format '{{index .RepoDigests 0}}')"
+          source_digest="${source_ref##*@}"
+          citation_revision="$(git rev-parse "${REVISION}:citation")"
+          test "$(docker image inspect "${source_image}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${REVISION}"
+          test "$(docker image inspect "${source_image}" --format '{{index .Config.Labels "org.comses.catalog.citation-revision"}}')" = "${citation_revision}"
+          docker tag "${source_image}" "${release_image}"
+          docker push "${release_image}" | tee /tmp/catalog-release-push.log
+          release_digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' /tmp/catalog-release-push.log | tail -n 1)"
+          test "${release_digest}" = "${source_digest}"
+          printf '{\n  "bundle_revision": "%s",\n  "citation_revision": "%s",\n  "image": "%s@%s",\n  "release_tag": "%s",\n  "schema_version": 1\n}\n' \
+            "${REVISION}" "${citation_revision}" "${image_name}" "${release_digest}" "${TAG}" > release-handoff.json
+          cat release-handoff.json >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload release handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: catalog-release-${{ steps.release.outputs.tag }}
+          path: release-handoff.json
+          if-no-files-found: error
+          retention-days: 90
