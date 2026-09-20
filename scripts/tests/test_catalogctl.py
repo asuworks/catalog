@@ -88,6 +88,25 @@ class ControllerTestCase(unittest.TestCase):
         with self.assertRaisesRegex(catalogctl.CatalogError, "identity is immutable"):
             self.controller.host_provision("prod", getpass.getuser())
 
+    def test_max_map_count_configuration_sets_a_minimum_without_reducing_higher_values(self) -> None:
+        current_path = Path(self.temporary.name) / "max_map_count"
+        config_path = Path(self.temporary.name) / "99-comses-catalog.conf"
+        for current, expected in ((65530, 262144), (1048576, 1048576)):
+            with self.subTest(current=current):
+                current_path.write_text(f"{current}\n", encoding="utf-8")
+                with (
+                    mock.patch.object(catalogctl, "MAX_MAP_COUNT_PATH", current_path),
+                    mock.patch.object(catalogctl, "MAX_MAP_COUNT_CONFIG", config_path),
+                    mock.patch.object(self.controller.runner, "run") as run,
+                ):
+                    self.controller.configure_max_map_count()
+
+                self.assertEqual(config_path.read_text(encoding="utf-8"), f"vm.max_map_count={expected}\n")
+                run.assert_called_once_with(
+                    ["sysctl", "-w", f"vm.max_map_count={expected}"],
+                    capture=False,
+                )
+
     def test_host_rejects_writable_identity_file(self) -> None:
         self.provision()
         self.layout.host_env.chmod(0o666)
@@ -273,7 +292,7 @@ class ControllerTestCase(unittest.TestCase):
                 return_value={"server": "18.0", "pg_dump": "18.0", "pg_restore": "18.0"},
             ),
             mock.patch.object(self.controller.runner, "to_file", side_effect=write_dump),
-            mock.patch.object(self.controller.runner, "from_file"),
+            mock.patch.object(self.controller.runner, "from_file") as validate_dump,
         ):
             artifact = self.controller.backup()
 
@@ -283,6 +302,7 @@ class ControllerTestCase(unittest.TestCase):
         self.assertEqual(receipt["sha256"], catalogctl.sha256_file(artifact))
         self.assertEqual(receipt["counts"]["citation_publication"], 10)
         self.assertIn(receipt["sha256"], artifact.with_suffix(".dump.sha256").read_text())
+        self.assertTrue(validate_dump.call_args.kwargs["discard_stdout"])
 
     def test_plain_restore_rejects_database_level_commands_before_starting_services(self) -> None:
         dump = Path(self.temporary.name) / "unsafe.sql"

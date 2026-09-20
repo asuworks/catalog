@@ -3,6 +3,23 @@
 This is the standalone checklist for validating locally, testing the fork workflows, deploying a fresh staging VM, and deploying a separate fresh production VM.
 Run it in order and stop at the first unexplained failure.
 
+## Prerequisites
+
+The workstation and both VMs need Git, GNU Make, Python 3.10 or newer, `xz`, Docker Engine, and the Docker Compose plugin.
+The deployment operator must be able to use Docker without `sudo`.
+After adding the operator to the `docker` group, sign out and back in before continuing.
+
+Verify the tools and Docker access on each machine:
+
+```sh
+git --version
+make --version
+python3 --version
+xz --version
+docker info
+docker compose version
+```
+
 Set these placeholders once:
 
 ```sh
@@ -163,7 +180,7 @@ COMPOSE=/var/lib/comses-catalog/runtime/docker-compose.yml
 docker compose -p catalog -f "$COMPOSE" ps
 docker compose -p catalog -f "$COMPOSE" exec -T scheduler run-parts --test /etc/cron.daily
 docker compose -p catalog -f "$COMPOSE" exec -T scheduler run-parts --test /etc/cron.monthly
-docker compose -p catalog -f "$COMPOSE" exec -T scheduler run-parts /etc/cron.daily
+docker compose -p catalog -f "$COMPOSE" exec -T scheduler /etc/cron.daily/daily_catalog_tasks
 tail -n 100 /var/lib/comses-catalog/shared/logs/cron.log
 systemctl list-timers comses-catalog-backup.timer
 sudo systemctl start comses-catalog-backup.service

@@ -55,7 +55,7 @@ sudo make host-provision HOST_ID=staging OPERATOR="$USER"
 ```
 
 Provisioning is idempotent and refuses to change an existing host from staging to production or vice versa.
-It creates random database and Django secrets, installs `vm.max_map_count=262144`, installs the host backup helper, and enables the nightly backup timer.
+It creates random database and Django secrets, ensures `vm.max_map_count` is at least `262144` without reducing a higher host value, installs the host backup helper, and enables the nightly backup timer.
 Rerun the same provisioning command after a release changes `scripts/catalogctl.py`; `host-check` rejects a stale installed backup helper.
 
 Review the generated configuration:
@@ -193,6 +193,7 @@ Host or attached-volume loss can therefore destroy both the database and backups
 
 The application scheduler is a separate Compose service.
 Its daily maintenance and monthly URL validation output is `/var/lib/comses-catalog/shared/logs/cron.log`.
+To exercise only Catalog's daily work during validation, run `/etc/cron.daily/daily_catalog_tasks` directly inside the scheduler container instead of invoking every distribution-provided daily job.
 
 ## Rollback and recovery
 

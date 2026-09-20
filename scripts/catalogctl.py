@@ -41,6 +41,9 @@ HOST_DOMAINS = {
     "prod": "catalog.comses.net",
 }
 HOST_HELPER = Path("/usr/local/libexec/comses-catalog")
+MAX_MAP_COUNT = 262144
+MAX_MAP_COUNT_PATH = Path("/proc/sys/vm/max_map_count")
+MAX_MAP_COUNT_CONFIG = Path("/etc/sysctl.d/99-comses-catalog.conf")
 MANAGED_ALIASES = {
     "publication",
     "publication_curator",
@@ -335,8 +338,15 @@ class Runner:
         source: BinaryIO,
         *,
         cwd: Path | None = None,
+        discard_stdout: bool = False,
     ) -> None:
-        subprocess.run(command, cwd=cwd, stdin=source, check=True)
+        subprocess.run(
+            command,
+            cwd=cwd,
+            stdin=source,
+            stdout=subprocess.DEVNULL if discard_stdout else None,
+            check=True,
+        )
 
 
 class Controller:
@@ -455,11 +465,21 @@ class Controller:
             os.chmod(password_path, 0o600)
             os.chmod(config_path, 0o600)
             self.install_host_helper(operator)
-            sysctl = Path("/etc/sysctl.d/99-comses-catalog.conf")
-            atomic_write(sysctl, b"vm.max_map_count=262144\n", 0o644)
-            self.runner.run(["sysctl", "--system"], capture=False)
+            self.configure_max_map_count()
         print(f"Provisioned {host_id} host state under {self.layout.var}")
         print(f"Review {config_path} before running host-check")
+
+    def configure_max_map_count(self) -> None:
+        try:
+            current = int(MAX_MAP_COUNT_PATH.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError) as error:
+            raise CatalogError(f"cannot read {MAX_MAP_COUNT_PATH}: {error}") from error
+        target = max(current, MAX_MAP_COUNT)
+        atomic_write(MAX_MAP_COUNT_CONFIG, f"vm.max_map_count={target}\n".encode(), 0o644)
+        self.runner.run(
+            ["sysctl", "-w", f"vm.max_map_count={target}"],
+            capture=False,
+        )
 
     def install_host_helper(self, operator: str) -> None:
         helper = HOST_HELPER
@@ -530,9 +550,8 @@ WantedBy=timers.target
         self.command_output(["docker", "compose", "version"])
         if sys.version_info < (3, 10):
             raise CatalogError("Python 3.10 or newer is required")
-        max_map = Path("/proc/sys/vm/max_map_count")
-        if max_map.exists() and int(max_map.read_text().strip()) < 262144:
-            raise CatalogError("vm.max_map_count must be at least 262144")
+        if MAX_MAP_COUNT_PATH.exists() and int(MAX_MAP_COUNT_PATH.read_text().strip()) < MAX_MAP_COUNT:
+            raise CatalogError(f"vm.max_map_count must be at least {MAX_MAP_COUNT}")
         if shutil.disk_usage(self.layout.var).free < 10 * 1024**3:
             raise CatalogError(f"less than 10 GiB free under {self.layout.var}")
         if self.layout.etc == Path("/etc/comses-catalog"):
@@ -850,6 +869,7 @@ WantedBy=timers.target
                     self.runner.from_file(
                         self.compose_command(compose_file, "exec", "-T", "db", "pg_restore", "--list"),
                         source,
+                        discard_stdout=True,
                     )
                 os.chmod(temporary, 0o600)
                 os.replace(temporary, target)

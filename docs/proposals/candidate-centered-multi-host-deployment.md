@@ -1,6 +1,6 @@
 # Candidate-centered multi-host deployment
 
-**Status:** Implemented; fork and two-host acceptance testing pending.
+**Status:** Implemented and accepted through fork workflows and independent staging and production VM rehearsals.
 
 This design gives Catalog one build artifact, an explicit human QA boundary, and independent staging and production hosts.
 The implementation is intentionally Docker Compose based and does not attempt zero-downtime deployment.
