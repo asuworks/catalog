@@ -100,11 +100,15 @@ docker compose exec -T django python3 manage.py shell -c \
 "from citation.models import Publication; print('all=', Publication.objects.count()); print('primary=', Publication.api.primary().count()); print('public=', Publication.api.primary().reviewed().count())" </dev/null
 ```
 
-Create a local curator account if needed:
+Create or update the local-only curator account after restoring any dump:
 
 ```sh
-docker compose exec django python3 manage.py createsuperuser
+docker compose exec -T django python3 manage.py shell -c \
+"from django.contrib.auth import get_user_model; User = get_user_model(); user, _ = User.objects.get_or_create(username='local-curator', defaults={'email': 'local-curator@example.invalid'}); user.is_active = True; user.is_staff = True; user.is_superuser = True; user.save(); print('local-curator is ready')" </dev/null
+docker compose exec django python3 manage.py changepassword local-curator
 ```
+
+Sign in at <http://localhost:8000/accounts/login/> as `local-curator` with the password just set.
 
 Open <http://localhost:8000> and verify:
 
