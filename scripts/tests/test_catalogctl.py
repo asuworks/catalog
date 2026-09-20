@@ -101,6 +101,15 @@ class ControllerTestCase(unittest.TestCase):
         with self.assertRaisesRegex(catalogctl.CatalogError, "database passwords differ"):
             self.controller.host_check()
 
+    def test_production_host_requires_complete_smtp_configuration(self) -> None:
+        self.provision("prod")
+
+        with self.assertRaisesRegex(
+            catalogctl.CatalogError,
+            "email.EMAIL_HOST_USER, email.EMAIL_HOST_PASSWORD",
+        ):
+            self.controller.host_check()
+
     def test_candidate_records_exact_image_bundle_and_citation_revisions(self) -> None:
         self.provision()
         image = "ghcr.io/comses/catalog@sha256:" + "a" * 64

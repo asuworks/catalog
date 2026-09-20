@@ -67,7 +67,7 @@ make host-check
 
 Do not change the database password in only one secret file.
 `host-check` requires the password in `config.ini` to match `postgres_password`.
-Production requires a real `EMAIL_HOST_PASSWORD`.
+Production requires nonempty SMTP host, port, user, and password values.
 Staging deliberately uses Django's file email backend and writes messages under `/var/lib/comses-catalog/shared/mail`; it never sends external email.
 
 Nginx binds to `127.0.0.1:80` for a same-host TLS proxy by default.

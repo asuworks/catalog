@@ -497,16 +497,35 @@ WantedBy=timers.target
             if secret.stat().st_size == 0:
                 raise CatalogError(f"empty secret file: {secret}")
         parser = configparser.ConfigParser()
-        parser.read(self.layout.secrets / "config.ini")
-        if not parser.has_option("db", "PASSWORD") or not parser.get("db", "PASSWORD"):
-            raise CatalogError("config.ini has no database password")
+        try:
+            parser.read(self.layout.secrets / "config.ini")
+        except configparser.Error as error:
+            raise CatalogError(f"invalid config.ini: {error}") from error
+        required_options = [("db", "PASSWORD"), ("django", "SECRET_KEY")]
+        if host.host_id == "prod":
+            required_options.extend(
+                ("email", option)
+                for option in ("EMAIL_HOST", "EMAIL_PORT", "EMAIL_HOST_USER", "EMAIL_HOST_PASSWORD")
+            )
+        missing_options = [
+            f"{section}.{option}"
+            for section, option in required_options
+            if not parser.get(section, option, fallback="").strip()
+        ]
+        if missing_options:
+            raise CatalogError(f"config.ini is missing required values: {', '.join(missing_options)}")
         database_password = (self.layout.secrets / "postgres_password").read_text(
             encoding="utf-8"
         ).rstrip("\r\n")
         if parser.get("db", "PASSWORD") != database_password:
             raise CatalogError("database passwords differ between config.ini and postgres_password")
-        if host.host_id == "prod" and not parser.get("email", "EMAIL_HOST_PASSWORD", fallback=""):
-            raise CatalogError("production config.ini requires EMAIL_HOST_PASSWORD")
+        if host.host_id == "prod":
+            try:
+                email_port = int(parser.get("email", "EMAIL_PORT"))
+            except ValueError as error:
+                raise CatalogError("email.EMAIL_PORT must be an integer") from error
+            if not 1 <= email_port <= 65535:
+                raise CatalogError("email.EMAIL_PORT must be between 1 and 65535")
         self.command_output(["docker", "info"])
         self.command_output(["docker", "compose", "version"])
         if sys.version_info < (3, 10):
@@ -1814,6 +1833,9 @@ def main(arguments: list[str] | None = None) -> int:
     except subprocess.CalledProcessError as error:
         print(f"ERROR: command failed with exit code {error.returncode}: {' '.join(error.cmd)}", file=sys.stderr)
         return error.returncode or 1
+    except OSError as error:
+        print(f"ERROR: operating system failure: {error}", file=sys.stderr)
+        return 1
     return 0
 
 
