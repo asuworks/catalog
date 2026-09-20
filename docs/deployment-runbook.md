@@ -1,215 +1,239 @@
 # Deployment runbook
 
-This runbook covers the single-host Docker Compose project `catalog`. Use the
-root `Makefile` for every deployment mutation. Staging and prod use the same
-stack and project name; normally deploy to staging, validate, then promote the
-same release to prod.
+Catalog uses one CI-built application image and two independent Docker Compose hosts.
+Staging and production never share credentials, databases, volumes, Compose files, or release state.
+Both hosts accept only the exact image digest and Catalog revision from the CI handoff.
+
+Use `make help` as the command index.
+Use [pre-release-testing.md](pre-release-testing.md) as the shortest complete release checklist.
 
 ## Release contract
 
-`CATALOG_IMAGE` must be an immutable reference: an explicit tag guaranteed not
-to be retagged, or a `sha256` digest. `:latest`, bare references, and malformed
-digests are rejected. `CATALOG_ES_HOST` must be explicitly selected as
-`elasticsearch` (ES 6.6.2) or `elasticsearch8` (ES 8.15.5). There is no ES
-default for a first deployment.
+The deployment unit is:
 
-With an existing `deploy/state/release.env`, omitted image and endpoint values
-are filled from the current recorded release. Thus promotion is:
+- an application image in `name@sha256:<64 lowercase hex>` form;
+- the full 40-character Catalog Git revision used as the deployment bundle;
+- the Citation Git revision recorded in both the Catalog gitlink and image label.
 
-```sh
-make deploy ENV=prod
-```
+`make candidate` rejects tags, a dirty checkout, revision mismatches, modified release bundles, malformed host identity, and images whose labels do not match the checkout.
+It renders and validates a candidate without changing the running release.
 
-For a new or intentionally different release, provide all values:
+CI publishes `release-handoff.json` after a successful `main` build.
+That file is the source for `IMAGE` and `BUNDLE_REVISION`.
+Production must use the same values that passed staging QA.
 
-```sh
-CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> \
-CATALOG_ES_HOST=elasticsearch make deploy ENV=staging
-```
+## Host layout
 
-Build and publish the exact image separately when needed:
+`sudo make host-provision` creates these host-local paths:
 
-```sh
-CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> make image-build
-CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> make image-push
-```
+| Path | Purpose |
+| --- | --- |
+| `/etc/comses-catalog/host.env` | Fixed `staging` or `prod` identity |
+| `/etc/comses-catalog/secrets/` | Django configuration and PostgreSQL password |
+| `/var/lib/comses-catalog/state/` | Candidate, active, rollback, and transaction state |
+| `/var/lib/comses-catalog/releases/` | Immutable Git release bundles and rendered Compose files |
+| `/var/lib/comses-catalog/runtime/docker-compose.yml` | Canonical active Compose file |
+| `/var/lib/comses-catalog/shared/` | Application, cron, staging mail, and Nginx files |
+| `/var/lib/comses-catalog/receipts/` | Backup and restore receipts |
+| `/var/lib/comses-catalog/reports/` | Release reports |
+| `/var/backups/comses-catalog/` | On-host PostgreSQL backups |
 
-The deploy preflight validates credentials, image immutability and image
-resolvability before changing the running stack. Solr is built locally before
-Compose startup because its image is not published.
+The Compose project is always `catalog`.
+Using the same project name is safe because staging and production are separate VMs.
+PostgreSQL, Elasticsearch, and static files use named volumes and are never deleted by release commands.
 
-## Root config and state safety
+## Provision a host
 
-`docker-compose.yml` at the repository root is generated release config and
-must be treated as the last-known-good deployment file. `deploy/state/` holds
-metadata (`release.env`, `production-rollback.env`, and the append-only history
-log), not the canonical Compose file. `production-rollback.env` is the prior
-production tuple used by `make rollback`. A direct prod-to-prod deploy replaces
-it with the immediately prior prod tuple. A staging deploy replacing a tracked
-prod release also records that immediately prior prod tuple before generic
-release state changes; promotion then preserves it.
+Install Git, Python 3.10 or newer, Docker Engine, and Docker Compose v2.
+Give the operator Docker access, then log out and back in so group membership is active.
 
-Deployment renders a temporary candidate and runs `up -d --wait` against it.
-Only successful startup publishes that candidate atomically at the root and
-removes a legacy `deploy/state/docker-compose.yml`. Any render, pull, build, or
-startup failure leaves both the old root file and legacy fallback untouched.
-
-Lifecycle commands reconcile the selected Compose file with release metadata.
-Missing/incompatible state, a stale root file, or both root and legacy files
-being present fails closed; the root file is never silently preferred. Resolve
-a legacy migration or conflict manually, then use Make commands again.
-
-## Prerequisites
-
-- Docker Compose v2 and a reachable single Docker host; no Swarm is required.
-- Elasticsearch hosts should meet the host prerequisite `vm.max_map_count >= 262144`.
-- `deploy/conf/config.ini` and `deploy/conf/postgres_password` must exist and
-  be nonempty. Run `make config-validate`.
-- The Postgres bind mount is `./docker/pgdata`. Named volumes include
-  `catalog_esdata`, `catalog_esdata8`, `catalog_solr`, `catalog_static`, and
-  `catalog_gunicornsocket`; deployment lifecycle commands do not delete them.
-- Deploy creates `docker/shared/catalog/logs` and
-  `docker/shared/nginx/logs`.
-- The selected image must be available locally or pullable, and the staging or
-  production DNS name must reach the host on port 80.
-
-## Development boundary and inspection
-
-`make bootstrap` followed by `make up` is the normal local development flow.
-`make down` and `make clean` are local operations; `clean` also removes local
-volumes. `make shell`, tests, checks, and migration checks are development
-operations too.
-
-When deployment metadata exists, development-mutating targets refuse to render
-or operate on the checkout. An intentional override is explicit:
+From a clean Catalog checkout:
 
 ```sh
-DEV_OVERRIDE=1 make up       # likewise shell, down, clean, or compose-dev
+sudo make host-provision HOST_ID=staging OPERATOR="$USER"
+# Use HOST_ID=prod on the production VM.
 ```
 
-Do not use that override on a deployment checkout unless the consequence is
-understood. `make logs` is inspection and uses the existing selected
-root-or-legacy configuration in one process.
-For deployment observability and lifecycle use:
+Provisioning is idempotent and refuses to change an existing host from staging to production or vice versa.
+It creates random database and Django secrets, installs `vm.max_map_count=262144`, installs the host backup helper, and enables the nightly backup timer.
+Rerun the same provisioning command after a release changes `scripts/catalogctl.py`; `host-check` rejects a stale installed backup helper.
+
+Review the generated configuration:
 
 ```sh
-make status                  # metadata plus catalog containers
-make logs                    # existing Compose configuration
-make stop                    # stop containers; keep networks and volumes
-make start                   # restart the recorded release
+$EDITOR /etc/comses-catalog/secrets/config.ini
+make host-check
 ```
 
-Plain root `docker compose` commands are inspection-only guidance (`ps`,
-`logs`, `config`). They do not provide a safe deployment/up/down interface.
+Do not change the database password in only one secret file.
+`host-check` requires the password in `config.ini` to match `postgres_password`.
+Production requires a real `EMAIL_HOST_PASSWORD`.
+Staging deliberately uses Django's file email backend and writes messages under `/var/lib/comses-catalog/shared/mail`; it never sends external email.
 
-## Standard release and rollback
+Nginx binds to `127.0.0.1:80` for a same-host TLS proxy by default.
+If ingress reaches the VM over the network, change `CATALOG_HTTP_BIND` in `host.env` to the required bind address and restore file permissions afterward.
 
-Schema changes are explicit and never run automatically. For a release that
-contains migrations on a fresh host, use this order:
+## Registry access
+
+The intended registry is `ghcr.io/<owner>/catalog`.
+Make the package public after its first publication so deployment hosts need no registry credentials.
+If it remains private, run `docker login ghcr.io` with a read-only package token on each host.
+
+The CI SHA tag is only a discovery name.
+Every host command uses the digest from the handoff, never the tag.
+
+## First deployment from a dump
+
+Check out the handoff revision and its Citation gitlink:
 
 ```sh
-CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> \
-CATALOG_ES_HOST=elasticsearch CONFIRM_PRODUCTION_MIGRATION=1 \
-make schema-migrate ENV=staging
-CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> \
-CATALOG_ES_HOST=elasticsearch make deploy ENV=staging
-# smoke-test staging, then promote without rerunning schema-migrate:
-make deploy ENV=prod
+git checkout <BUNDLE_REVISION>
+bash scripts/checkout-citation.sh <github-owner-containing-the-citation-commit>
+git status --short
+git -C citation status --short
 ```
 
-`schema-migrate` requires an explicit immutable image, explicit ES host, and
-`CONFIRM_PRODUCTION_MIGRATION=1`. It verifies credentials and database
-readiness. On a fresh host (no release state, no legacy file, and no existing
-`catalog` containers), it starts only the candidate database so this command
-can bootstrap the database. It renders a temporary candidate and runs these
-commands there, in order: `makemigrations --check --dry-run`,
-`migrate --plan`, `migrate --noinput`, and `migrate --check`. It never
-publishes the candidate or changes Compose/release/history state. A normal
-deploy performs only a non-mutating `migrate --check` guard and refuses pending
-migrations.
-Because staging and prod share the database, apply the migration once. Use
-expand/contract-compatible changes when old and new application versions can
-overlap. There is no automatic schema rollback; a failed or partly applied
-migration requires manual investigation before retrying. For later releases,
-an existing tracked deployment is required and `schema-migrate` uses its
-existing database without starting a new stack; run `make backup` before it.
-Do not reapply the migration during promotion.
+Both status commands must be empty.
 
-For a subsequent release, the complete sequence is:
+Create the candidate, restore the dump, apply current migrations, build derived data, and activate it:
+
+```sh
+make candidate IMAGE='<name@sha256:digest>' BUNDLE_REVISION='<40-char-sha>'
+make restore DUMP=/absolute/path/catalog.sql.xz CONFIRM=comses_catalog
+CONFIRM_SCHEMA_MIGRATION=1 make schema-migrate
+make data-rebuild
+make deploy
+make backup
+make release-report
+```
+
+Restore accepts `.dump`, `.sql`, and `.sql.xz`.
+It verifies an adjacent `<dump>.sha256` file when present, rejects database-level commands in plain SQL, restores into a temporary database, validates data counts and constraints, then atomically swaps database names.
+The previous empty database is retained under a timestamped name.
+Restore is allowed only before the host has an active release.
+An interrupted or failed restore locks the candidate until the operator investigates it and runs the explicit incident retry described below.
+
+`schema-migrate` runs `makemigrations --check --dry-run`, `migrate --plan`, `migrate --noinput`, and `migrate --check` in that order.
+It does not deploy the application.
+
+`data-rebuild` creates and validates new Elasticsearch generation indexes, atomically swaps aliases, preserves the previous generation for rollback, and refreshes the visualization cache.
+`deploy` performs only non-mutating migration and search guards before starting the candidate.
+
+## Subsequent release
+
+Create a current backup before any schema work:
 
 ```sh
 make backup
-CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> \
-CATALOG_ES_HOST=elasticsearch CONFIRM_PRODUCTION_MIGRATION=1 \
-make schema-migrate ENV=staging
-CATALOG_IMAGE=comses/catalog/prod:<immutable-tag> \
-CATALOG_ES_HOST=elasticsearch make deploy ENV=staging
-# smoke-test, then promote the same image/endpoint:
-make deploy ENV=prod
+make candidate IMAGE='<name@sha256:digest>' BUNDLE_REVISION='<40-char-sha>'
+CONFIRM_SCHEMA_MIGRATION=1 make schema-migrate
+make data-rebuild
+make deploy
+make status
+make release-report
 ```
 
-After staging smoke tests, promote with `make deploy ENV=prod`. A successful
-deploy records current and previous environment, image, endpoint, and time in
-`deploy/state/release.env` (its previous fields are informational; rollback
-uses the production anchor); history is appended after success. A successful
-prod deploy that replaces an existing prod release also updates
-`production-rollback.env` to that prior prod tuple. A staging deployment that
-replaces an existing prod release likewise records that prior prod tuple;
-staging is never a production rollback target. The deployment operation recreates changed
-services as needed, but this is not a promise of zero downtime.
+The backup gate accepts only a verified backup from the current active release that is less than 24 hours old.
+There is no automatic database schema rollback, so migrations must remain compatible with the previous application when rollback is expected.
 
-Rollback is a release redeploy, never an endpoint-only edit:
+## Staging and production
+
+Run the first-deployment or subsequent-release sequence independently on staging.
+Complete browser QA and retain its release report.
+
+On production, check out the same bundle revision and use the same image digest.
+Production does not read or copy staging state.
+It repeats its own backup, migration, rebuild, deployment, and report steps against its own data.
+
+For a fresh production VM migration:
+
+1. Stop or make the old production application read-only.
+2. Create and transfer the final production dump.
+3. Run the first-deployment sequence on the new production VM.
+4. Verify counts and application behavior before switching ingress.
+5. Keep the old VM intact during initial validation.
+
+The old VM is a valid fallback only until the new production database accepts writes.
+After that point, returning traffic to the old database would lose or split new data.
+
+## Status and reports
+
+Use only the controller for deployment lifecycle changes:
 
 ```sh
 make status
-make rollback
+make release-report
+make logs
+make stop
+make start
+```
+
+The report records image and source revisions, service image digests, PostgreSQL client and server versions, application database counts, validated search counts and aliases, email backend, and latest eligible backup.
+It also warns that backups are currently on-host only.
+
+The active Compose file is `/var/lib/comses-catalog/runtime/docker-compose.yml`.
+Direct `docker compose` commands are useful for inspection, but they are not a supported deploy or rollback interface.
+
+## Backup schedule
+
+The provisioner enables `comses-catalog-backup.timer`, scheduled daily at 02:15 UTC.
+Backups are custom-format PostgreSQL dumps with SHA-256 files and JSON receipts.
+The controller validates each dump with the PostgreSQL 18 `pg_restore` from the database container and retains 30 days.
+
+Verify the schedule and run it once manually:
+
+```sh
+systemctl list-timers comses-catalog-backup.timer
+sudo systemctl start comses-catalog-backup.service
+journalctl -u comses-catalog-backup.service --since today
+```
+
+These backups are on the same host.
+Host or attached-volume loss can therefore destroy both the database and backups; off-host copies are deliberately deferred and remain an operational risk.
+
+The application scheduler is a separate Compose service.
+Its daily maintenance and monthly URL validation output is `/var/lib/comses-catalog/shared/logs/cron.log`.
+
+## Rollback and recovery
+
+`make rollback` activates the immediately previous successful release from the same host and restores its recorded search aliases.
+It never copies state from the other host and never reverses database migrations.
+Rollback fails closed if its Compose file or release bundle has changed.
+
+Deployment and rollback use a durable transaction journal.
+If activation fails, the controller reconciles and health-checks the prior runtime before reporting recovery success.
+If recovery cannot be verified, the journal remains and normal mutations stop.
+
+Inspect the error, then run:
+
+```sh
+make recover
 make status
 ```
 
-It uses the dedicated recorded prior-production environment, immutable image,
-and ES endpoint. If no prior production deploy exists, rollback fails closed.
-`make stop`/`make start` are the production-safe lifecycle pair; they do not
-tear down networks or delete volumes. Database operations are:
+A failed or interrupted restore, migration, or data rebuild locks its candidate.
+After investigating and repairing the underlying database or search problem, explicitly authorize a retry:
 
 ```sh
-make backup
-make restore
+CONFIRM_CANDIDATE_RETRY=1 make candidate-retry
+# Rerun restore, schema-migrate, or data-rebuild as reported.
 ```
 
-`make backup` invokes the application backup task in the running Django
-container. `make restore` requires `catalog.sql`, prompts for confirmation, and
-runs the application restore task.
+Do not use `candidate-retry` as a substitute for understanding a partly applied migration.
 
-## ES8 cutover
+## CI and release tags
 
-ES8 remains a separate, explicitly gated decision. With a deployed release and
-healthy ES8 container, run the single cutover command:
+Pull requests build and test but do not publish images.
+A successful push to `main` publishes `ghcr.io/<owner>/catalog:sha-<commit>` and a handoff artifact containing its exact digest.
 
-```sh
-CATALOG_IMAGE=<already-deployed-image> CONFIRM_ES8_CUTOVER=1 \
-make es8-cutover ENV=staging
+Release tags must be annotated, point to `main`, and use one of these forms:
+
+```text
+v2026.09-rc.1
+v2026.09
+v2026.09.1
 ```
 
-The command rejects a different image, then runs the foreground ES8 rebuild,
-alias/count/query validation, and the ES8 deployment. It does not accept a
-normal `make deploy` transition from ES6 to ES8. After staging smoke tests,
-promote the same release with `make deploy ENV=prod`; the recorded ES8 endpoint
-is reused. Run the same gated command for prod only when a separate prod
-cutover is intended.
-
-The existing direct search routes and ES8 alias/index behavior are unchanged;
-this runbook does not redesign them. Keep ES6 data available while ES6-backed
-rollback remains possible. ES8 index/alias rollback is a separate operational
-decision from application release rollback.
-
-## Legacy migration
-
-Do not run or delete `deploy/state/docker-compose.yml` manually as part of a
-normal rollout. A legacy-only checkout can be used by validated lifecycle
-commands as a fallback. If both the legacy file and root file exist, commands
-fail closed rather than choosing one. Resolve the conflict by an operator,
-verify the release metadata and selected file agree, then continue with
-`make status`, `make start`, `make stop`, or `make deploy`.
-
-The old root `./deploy.sh` is a deprecation error and performs no action. Use
-the Make targets listed above.
+The tag workflow verifies the existing SHA image and adds the matching registry tag without rebuilding it.
+The application footer comes from `release-version.txt`, generated by `git describe` during the original SHA image build.
+Adding a registry alias later does not alter that immutable image or its footer.
