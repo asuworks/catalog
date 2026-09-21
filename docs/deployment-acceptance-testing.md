@@ -376,11 +376,11 @@ After staging QA succeeds, return to the workstation and choose an unused stable
 
 ```sh
 test "$SOURCE_OWNER" != comses
-export TEST_FINAL_TAG="v$(date -u +%Y.%m)"
-printf '%s\n' "$TEST_FINAL_TAG" | grep -Eq '^v[0-9]{4}\.[0-9]{2}(\.[0-9]+)?$'
+export TEST_FINAL_TAG="v$(date -u +%Y.%m).999"
+printf '%s\n' "$TEST_FINAL_TAG" | grep -Eq '^v[0-9]{4}\.[0-9]{2}(\.[0-9]{1,3})?$'
 if git show-ref --verify --quiet "refs/tags/${TEST_FINAL_TAG}" || \
    git ls-remote --exit-code "$CATALOG_SOURCE_REMOTE" "refs/tags/${TEST_FINAL_TAG}" >/dev/null 2>&1; then
-  echo "ERROR: choose an unused vYYYY.MM or vYYYY.MM.N test tag" >&2
+  echo "ERROR: choose an unused vYYYY.MM.N test tag with a one-to-three-digit fork-only patch" >&2
   exit 1
 fi
 git fetch "$CATALOG_SOURCE_REMOTE" main

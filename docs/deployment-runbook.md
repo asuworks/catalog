@@ -373,11 +373,11 @@ The successful official `main` build is the release candidate, not the final rel
 After staging approval, publish a final release before deploying to production.
 The final tag is never a deployment input and the workflow does not rebuild the image.
 
-Choose the next unused `vYYYY.MM` or `vYYYY.MM.N` tag:
+Choose the next unused `vYYYY.MM` or `vYYYY.MM.N` tag, where `N` contains one to three digits:
 
 ```sh
 export FINAL_TAG="v$(date -u +%Y.%m)"
-printf '%s\n' "$FINAL_TAG" | grep -Eq '^v[0-9]{4}\.[0-9]{2}(\.[0-9]+)?$'
+printf '%s\n' "$FINAL_TAG" | grep -Eq '^v[0-9]{4}\.[0-9]{2}(\.[0-9]{1,3})?$'
 if git show-ref --verify --quiet "refs/tags/${FINAL_TAG}" || \
    git ls-remote --exit-code origin "refs/tags/${FINAL_TAG}" >/dev/null 2>&1; then
   echo "ERROR: tag ${FINAL_TAG} already exists" >&2
