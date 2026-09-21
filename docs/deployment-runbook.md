@@ -11,6 +11,22 @@ Both hosts deploy the exact image digest and Catalog revision from the same CI h
 Use `make help` as the command index.
 Stop at the first unexplained failure.
 
+## Release lifecycle
+
+A **candidate** is an immutable image and handoff produced by a successful `main` build.
+A **final release** is a staging-approved candidate identified by a stable version tag and a GitHub Release.
+A **deployment** activates that same image digest on a host.
+
+The normal path is:
+
+1. Merge to `main` and let CI publish the candidate image and handoff.
+2. Deploy the candidate to staging and complete QA.
+3. Push an annotated `vYYYY.MM` or `vYYYY.MM.N` tag so CI publishes the final GitHub Release without rebuilding the image.
+4. Deploy the exact staging-approved digest to production.
+
+A Package without a GitHub Release is a candidate awaiting approval.
+Catalog does not use RC tags.
+
 ## Choose the procedure
 
 Choose from the host state before running any database command:
@@ -40,11 +56,12 @@ The deployment unit is:
 `make candidate` rejects tags, a dirty checkout, revision mismatches, modified release bundles, malformed host identity, and images whose labels do not match the checkout.
 It renders and validates a candidate without changing the running release.
 
-CI publishes `release-handoff.json` after a successful build of `comses/catalog` `main`.
-That file is the source for `IMAGE` and `BUNDLE_REVISION`.
-Production must use the exact values that passed staging QA.
+CI publishes a candidate `release-handoff.json` after a successful build of `comses/catalog` `main`.
+That file is the source for `IMAGE` and `BUNDLE_REVISION` throughout staging and production.
+After staging approval, the final tag workflow creates the GitHub Release, attaches a matching handoff, and gives the same image digest a stable registry alias.
+Production must use the original candidate values that passed staging QA and must not begin before the final GitHub Release is published.
 
-## 1. Verify the release locally
+## 1. Verify the changes locally
 
 Run these commands from the Catalog topic branch on the workstation.
 Set the branch names to the branches being released:
@@ -350,10 +367,11 @@ Complete staging QA:
 
 Staging must not contain working SMTP credentials and must never send external email.
 
-## 5. Optionally publish a final tag
+## 5. Publish the final release
 
-The successful official `main` build is already the release candidate, so no RC tag is required.
-A final tag is optional, is never a deployment input, and should be created only after staging approval.
+The successful official `main` build is the release candidate, not the final release.
+After staging approval, publish a final release before deploying to production.
+The final tag is never a deployment input and the workflow does not rebuild the image.
 
 Choose the next unused `vYYYY.MM` or `vYYYY.MM.N` tag:
 
@@ -371,7 +389,7 @@ git tag -a "$FINAL_TAG" "$BUNDLE_REVISION" -m "Catalog ${FINAL_TAG#v}"
 git push origin "refs/tags/${FINAL_TAG}"
 ```
 
-Watch the tag workflow and verify that it aliases the staged image without rebuilding it:
+Watch the `Publish final release` workflow and verify the visible GitHub Release and its attached handoff:
 
 ```sh
 export TAG_RUN_ID=
@@ -388,10 +406,17 @@ for _attempt in $(seq 1 24); do
 done
 test -n "$TAG_RUN_ID"
 gh run watch "$TAG_RUN_ID" --repo comses/catalog --exit-status
+test "$(gh release view "$FINAL_TAG" --repo comses/catalog --json tagName --jq .tagName)" = "$FINAL_TAG"
+test "$(gh release view "$FINAL_TAG" --repo comses/catalog --json isDraft --jq .isDraft)" = false
+test "$(gh release view "$FINAL_TAG" --repo comses/catalog --json isPrerelease --jq .isPrerelease)" = false
+RELEASE_URL="$(gh release view "$FINAL_TAG" --repo comses/catalog --json url --jq .url)"
+export RELEASE_URL
+test -n "$RELEASE_URL"
+printf 'Final release: %s\n' "$RELEASE_URL"
 TAG_HANDOFF_DIR="$(mktemp -d "$PWD/private/release-handoffs/${FINAL_TAG}.XXXXXX")"
-gh run download "$TAG_RUN_ID" \
+gh release download "$FINAL_TAG" \
   --repo comses/catalog \
-  --name "catalog-release-${FINAL_TAG}" \
+  --pattern release-handoff.json \
   --dir "$TAG_HANDOFF_DIR"
 TAG_HANDOFF="${TAG_HANDOFF_DIR}/release-handoff.json"
 TAG_IMAGE="$(python3 -c 'import json, pathlib, sys; print(json.loads(pathlib.Path(sys.argv[1]).read_text())["image"])' "$TAG_HANDOFF")"
@@ -405,10 +430,11 @@ test "$TAG_RELEASE_TAG" = "$FINAL_TAG"
 ```
 
 Continue to production with `IMAGE` and `BUNDLE_REVISION` from the original `main` handoff.
-The tag is only a human-readable alias for the same immutable image.
+The GitHub Release and registry tag identify the approved candidate, but neither replaces the digest as the deployment input.
 
 ## 6. Deploy to an existing production host
 
+Complete Section 5 successfully before continuing.
 Use the exact handoff approved on staging.
 Do not rebuild the image, download a newer handoff, transfer the staging database, or run `make restore`.
 
@@ -458,6 +484,7 @@ Complete the browser smoke tests through normal production ingress.
 
 Use this section only for a new or replacement host with no active release.
 After this succeeds, all later releases use Sections 4 or 6.
+A first staging deployment may use a candidate, but a first production deployment requires the final release from Section 5.
 
 ### Provision the host
 
@@ -554,11 +581,12 @@ Complete the browser, email-backend, scheduler, and backup checks before accepti
 
 For a first deployment onto a replacement production VM:
 
-1. Stop writes or make the old production application read-only.
-2. Create and transfer the final production dump and checksum.
-3. Run the first-deployment sequence on the new VM.
-4. Verify counts and application behavior before switching ingress.
-5. Keep the old VM intact during initial validation.
+1. Validate the candidate on staging and publish the final release.
+2. Stop writes or make the old production application read-only.
+3. Create and transfer the final production dump and checksum.
+4. Run the first-deployment sequence on the new VM.
+5. Verify counts and application behavior before switching ingress.
+6. Keep the old VM intact during initial validation.
 
 The old VM is a valid fallback only until the new production database accepts writes.
 After that point, returning traffic to the old database would lose or split new data.
@@ -694,15 +722,15 @@ CONFIRM_CANDIDATE_RETRY=1 make candidate-retry
 Do not use `candidate-retry` as a substitute for understanding a partly applied migration.
 Do not run `make rollback` on a first deployment because no prior active release exists.
 
-### Image registry, tags, and footer
+### Image registry, releases, tags, and footer
 
 The intended registry is `ghcr.io/comses/catalog`.
 The CI SHA tag is only a discovery name.
 Every host command uses the digest from the handoff, never the tag.
 
 The normal process does not create RC tags.
-An optional final tag aliases the existing image digest without rebuilding it.
-Deployment continues to use the image digest and bundle revision from the original `main` handoff.
+After staging approval, the required final tag creates a GitHub Release, attaches its handoff, and aliases the existing image digest without rebuilding it.
+Production continues to use the image digest and bundle revision from the original `main` handoff.
 
 The application footer comes from `release-version.txt`, generated by `git describe` during the original SHA image build.
 Adding a registry alias later does not alter that immutable image or its footer.

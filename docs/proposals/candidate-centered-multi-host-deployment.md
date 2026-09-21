@@ -2,6 +2,7 @@
 
 **Status:** Implemented and validated through fork workflows and independent staging and production VM rehearsals.
 Upstream maintainer review and deployment on the real staging and production hosts remain pending.
+Final GitHub Release publication was added after those rehearsals and remains to be exercised by the next approved stable tag.
 
 This document records the design and is not an operator procedure.
 Use [the release and deployment runbook](../deployment-runbook.md) for real releases and [the deployment acceptance guide](../deployment-acceptance-testing.md) for disposable-host validation.
@@ -13,6 +14,9 @@ The implementation is intentionally Docker Compose based and does not attempt ze
 
 - Staging and production are separate VMs with independent state, secrets, databases, search volumes, and backups.
 - CI builds once and publishes to GHCR.
+- A successful `main` build is a candidate, not a final release.
+- After staging approval, a stable annotated tag creates the GitHub Release and registry alias without rebuilding.
+- Production deployment begins only after final release publication.
 - Hosts deploy only an exact `name@sha256:<digest>` reference.
 - The same image digest and Catalog bundle revision move from staging approval to production.
 - Each host has a fixed `staging` or `prod` identity established during provisioning.
@@ -43,8 +47,9 @@ CI checks out the Catalog commit and exact Citation gitlink, runs all checks and
 Pull requests do not publish.
 A successful `main` build pushes `sha-<catalog-revision>`, resolves the registry digest, pulls that exact digest again, verifies its labels, and uploads `release-handoff.json`.
 
-Annotated release tags add a human-readable registry alias to the existing SHA image.
-They do not rebuild it and do not change the digest.
+After staging approval, an annotated stable release tag adds a human-readable registry alias to the existing SHA image, creates the GitHub Release, and attaches `release-handoff.json`.
+Catalog does not use RC tags.
+Final publication does not rebuild the image or change its digest.
 
 ### Staging host
 
@@ -169,10 +174,11 @@ Database migrations are not reversed, so application rollback depends on compati
 The production migration intentionally uses downtime:
 
 1. Validate the release against a representative dump on local and staging systems.
-2. Stop writes on the old production host.
-3. Create the final dump.
-4. Restore, migrate, rebuild, and validate on the fresh production VM.
-5. Switch ingress to the new VM.
+2. Publish the staging-approved final GitHub Release.
+3. Stop writes on the old production host.
+4. Create the final dump.
+5. Restore, migrate, rebuild, and validate on the fresh production VM.
+6. Switch ingress to the new VM.
 
 The untouched old VM can be used as fallback before the new database accepts writes.
 Once new writes begin, host fallback is no longer safe because the databases diverge.
@@ -209,7 +215,7 @@ The implementation is accepted when:
 - Catalog and Citation checks, migrations checks, and behavior tests pass;
 - pull requests do not publish images;
 - a main build emits a verified digest handoff;
-- an annotated tag aliases that digest without rebuilding;
+- a staging-approved annotated tag aliases that digest without rebuilding and creates a GitHub Release with the matching handoff;
 - the same digest deploys independently to staging and production simulations;
 - staging records file-based email and production records SMTP email;
 - dump counts survive restore and search counts validate;

@@ -4,6 +4,10 @@ This guide validates the release machinery on a personal fork and two disposable
 It is not the procedure for a real release.
 Use [deployment-runbook.md](deployment-runbook.md) for official CoMSES releases and real hosts.
 
+The fork `main` build first publishes only a candidate Package and handoff.
+After that candidate passes staging QA, this guide creates a stable-format tag and GitHub Release in the personal fork to validate final publication.
+That fork release is rehearsal evidence, not an official CoMSES release.
+
 Run this guide when initially accepting the deployment system or after material changes to CI publication, candidate validation, restore, backup, activation, or rollback.
 Do not repeat it for every application release when the deployment machinery is unchanged.
 Never run the rollback or failure checks against real staging or production.
@@ -120,6 +124,7 @@ Open <http://localhost:8000> and verify:
 
 This section proves that pull requests test without publishing and that a fork `main` build publishes an immutable handoff.
 It deliberately updates the personal fork's `main` branch.
+It does not create a version tag or GitHub Release.
 
 Confirm both repositories are clean and point to the intended personal fork:
 
@@ -257,7 +262,8 @@ test "$HANDOFF_CITATION_REVISION" = "$CITATION_SHA"
 ```
 
 Make the personal-fork package public after its first publication so disposable hosts can pull it without credentials.
-Do not create an RC tag for this rehearsal.
+Do not create an RC tag.
+At this point GitHub should show a Catalog Package but no Release because the candidate has not passed staging QA yet.
 
 ```sh
 printf 'https://github.com/users/%s/packages/container/catalog/settings\n' "$SOURCE_OWNER"
@@ -363,6 +369,69 @@ socat OPENSSL-LISTEN:8443,reuseaddr,fork,verify=0,cert=/tmp/catalog-test.crt,key
 ```
 
 Browse <https://staging-catalog.comses.net:8443>, accept the temporary certificate, and repeat the five browser checks from local validation.
+
+### Validate final publication in the fork
+
+After staging QA succeeds, return to the workstation and choose an unused stable-format test tag in the personal fork:
+
+```sh
+test "$SOURCE_OWNER" != comses
+export TEST_FINAL_TAG="v$(date -u +%Y.%m)"
+printf '%s\n' "$TEST_FINAL_TAG" | grep -Eq '^v[0-9]{4}\.[0-9]{2}(\.[0-9]+)?$'
+if git show-ref --verify --quiet "refs/tags/${TEST_FINAL_TAG}" || \
+   git ls-remote --exit-code "$CATALOG_SOURCE_REMOTE" "refs/tags/${TEST_FINAL_TAG}" >/dev/null 2>&1; then
+  echo "ERROR: choose an unused vYYYY.MM or vYYYY.MM.N test tag" >&2
+  exit 1
+fi
+git fetch "$CATALOG_SOURCE_REMOTE" main
+git merge-base --is-ancestor "$CATALOG_SHA" "${CATALOG_SOURCE_REMOTE}/main"
+git tag -a "$TEST_FINAL_TAG" "$CATALOG_SHA" -m "Catalog ${TEST_FINAL_TAG#v} fork rehearsal"
+git push "$CATALOG_SOURCE_REMOTE" "refs/tags/${TEST_FINAL_TAG}"
+```
+
+Wait for the final-release workflow and verify the GitHub Release:
+
+```sh
+export TAG_RUN_ID=
+for _attempt in $(seq 1 24); do
+  TAG_RUN_ID="$(gh run list \
+    --repo "${SOURCE_OWNER}/catalog" \
+    --workflow release-tag.yml \
+    --branch "$TEST_FINAL_TAG" \
+    --limit 10 \
+    --json databaseId,headSha \
+    --jq "map(select(.headSha == \"${CATALOG_SHA}\"))[0].databaseId // empty")"
+  [ -z "$TAG_RUN_ID" ] || break
+  sleep 5
+done
+test -n "$TAG_RUN_ID"
+gh run watch "$TAG_RUN_ID" --repo "${SOURCE_OWNER}/catalog" --exit-status
+test "$(gh release view "$TEST_FINAL_TAG" --repo "${SOURCE_OWNER}/catalog" --json tagName --jq .tagName)" = "$TEST_FINAL_TAG"
+test "$(gh release view "$TEST_FINAL_TAG" --repo "${SOURCE_OWNER}/catalog" --json isDraft --jq .isDraft)" = false
+test "$(gh release view "$TEST_FINAL_TAG" --repo "${SOURCE_OWNER}/catalog" --json isPrerelease --jq .isPrerelease)" = false
+```
+
+Download the attached final handoff and prove that publication did not change the tested candidate:
+
+```sh
+FORK_RELEASE_DIR="$(mktemp -d "$PWD/private/release-handoffs/${TEST_FINAL_TAG}.XXXXXX")"
+gh release download "$TEST_FINAL_TAG" \
+  --repo "${SOURCE_OWNER}/catalog" \
+  --pattern release-handoff.json \
+  --dir "$FORK_RELEASE_DIR"
+FORK_RELEASE_HANDOFF="${FORK_RELEASE_DIR}/release-handoff.json"
+FORK_RELEASE_IMAGE="$(python3 -c 'import json, pathlib, sys; print(json.loads(pathlib.Path(sys.argv[1]).read_text())["image"])' "$FORK_RELEASE_HANDOFF")"
+FORK_RELEASE_BUNDLE="$(python3 -c 'import json, pathlib, sys; print(json.loads(pathlib.Path(sys.argv[1]).read_text())["bundle_revision"])' "$FORK_RELEASE_HANDOFF")"
+FORK_RELEASE_CITATION="$(python3 -c 'import json, pathlib, sys; print(json.loads(pathlib.Path(sys.argv[1]).read_text())["citation_revision"])' "$FORK_RELEASE_HANDOFF")"
+FORK_RELEASE_TAG="$(python3 -c 'import json, pathlib, sys; print(json.loads(pathlib.Path(sys.argv[1]).read_text())["release_tag"])' "$FORK_RELEASE_HANDOFF")"
+test "$FORK_RELEASE_IMAGE" = "$IMAGE"
+test "$FORK_RELEASE_BUNDLE" = "$BUNDLE_REVISION"
+test "$FORK_RELEASE_CITATION" = "$HANDOFF_CITATION_REVISION"
+test "$FORK_RELEASE_TAG" = "$TEST_FINAL_TAG"
+```
+
+The GitHub Release and registry tag are labels for the approved candidate.
+The production simulation continues to use the original digest handoff.
 
 ## 4. Validate a separate fresh production host
 
