@@ -1,12 +1,10 @@
 import pandas as pd
 import plotly.graph_objs as go
-import plotly.figure_factory as ff
 
 from django.db import models
-from django.db.models.functions import Concat
 from plotly.subplots import make_subplots
 
-from citation.models import Publication, CodeArchiveUrl, Author
+from citation.models import Publication
 
 
 def get_publication_queryset(pks):

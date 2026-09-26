@@ -5,8 +5,8 @@ from django.core.cache import cache
 from django_pandas.io import read_frame
 
 from catalog.core.search_indexes import PublicationDocSearch
-from citation.models import Publication, Author, PublicationAuthors, Platform, PublicationPlatforms, Sponsor, \
-    PublicationSponsors, Tag, PublicationTags, Container, CodeArchiveUrl
+from citation.models import Publication, PublicationAuthors, PublicationPlatforms, PublicationSponsors, \
+    CodeArchiveUrl
 
 logger = logging.getLogger('data_access')
 
