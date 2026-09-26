@@ -49,7 +49,9 @@ class PopulateVisualizationCacheCommandTest(TestCase):
         publication = SimpleNamespace(
             id=42,
             container=SimpleNamespace(id=7, name='Journal of Modeling'),
+            # dateutil cannot parse "SEP-OCT 2007", but Citation persists its year
             date_published=None,
+            year_published=2007,
             has_available_code=False,
             model_documentation=model_documentation,
             status='REVIEWED',
@@ -60,6 +62,7 @@ class PopulateVisualizationCacheCommandTest(TestCase):
 
         self.assertEqual(dataframe.index.name, 'id')
         self.assertEqual(dataframe.loc[42, 'container_id'], 7)
+        self.assertEqual(dataframe.loc[42, 'year_published'], 2007)
         self.assertEqual(dataframe.loc[42, 'title'], 'A Model Publication')
 
     def test_clear_replaces_stale_cache_data(self):

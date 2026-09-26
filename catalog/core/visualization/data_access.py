@@ -29,8 +29,7 @@ def create_publication_df(publication_queryset):
                 'container_id': p.container.id,
                 'container_name': p.container.name,
                 'date_published': p.date_published,
-                'year_published':
-                    p.date_published.year if p.date_published is not None else None,
+                'year_published': p.year_published,
                 'has_available_code': p.has_available_code,
                 'has_flow_charts': 'Flow charts' in model_documentation,
                 'has_math_description': 'Mathematical description' in model_documentation,
