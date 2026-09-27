@@ -31,7 +31,7 @@ class CatalogSearchForm(Form):
     status = forms.ChoiceField(choices=STATUS_CHOICES, required=False)
     journal = forms.CharField(required=False)
     tags = forms.CharField(required=False, widget=forms.Select(attrs={'multiple': "multiple", 'name': "tags",
-                                                                      'data-bind': "selectize: tags, selectedOptions: selectedTags, optionsCaption: 'Keywords', optionsValue: 'name', options: { create: false, load: getTagList, hideSelected: true }, value: SelectedTags"}))
+                                                                      'data-bind': "selectize: tags, selectedOptions: selectedTags, optionsCaption: 'Keywords', optionsValue: 'name', options: { create: false, load: getTagList, hideSelected: true }"}))
     authors = forms.CharField(required=False)
     assigned_curator = forms.CharField(required=False)
     flagged = forms.ChoiceField(choices=ANY_CHOICES, required=False)
