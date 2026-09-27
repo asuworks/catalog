@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import BinaryIO
 from unittest import mock
 
@@ -135,6 +136,15 @@ class ControllerTestCase(unittest.TestCase):
         self.layout.host_env.chmod(0o666)
         with self.assertRaisesRegex(catalogctl.CatalogError, "unsafe permissions"):
             self.controller.host()
+
+    def test_host_check_requires_tarfile_extraction_filters(self) -> None:
+        self.provision()
+
+        with (
+            mock.patch.object(catalogctl, "tarfile", SimpleNamespace()),
+            self.assertRaisesRegex(catalogctl.CatalogError, "3.10.12"),
+        ):
+            self.controller.host_check()
 
     def test_host_rejects_mismatched_database_password_files(self) -> None:
         self.provision()

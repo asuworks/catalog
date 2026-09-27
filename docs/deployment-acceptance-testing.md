@@ -16,7 +16,7 @@ Stop at the first unexplained failure.
 
 ## Prerequisites
 
-The workstation and both disposable VMs need Git, GNU Make, Python 3.10 or newer, `xz`, Docker Engine, and the Docker Compose plugin.
+The workstation and both disposable VMs need Git, GNU Make, Python 3.12 or newer (3.10.12+ and 3.11.4+ also work), `xz`, Docker Engine, and the Docker Compose plugin.
 The workstation also needs the GitHub CLI (`gh`), OpenSSH (`ssh` and `scp`), OpenSSL, and `socat`.
 Each VM must use systemd for the backup service and timer.
 The operator must be able to use Docker without `sudo`.

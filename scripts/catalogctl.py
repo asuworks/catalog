@@ -519,6 +519,9 @@ WantedBy=timers.target
 
     def host_check(self) -> None:
         host = self.host()
+        # extraction filters were backported, so test the feature, not the version
+        if sys.version_info < (3, 10) or not hasattr(tarfile, "data_filter"):
+            raise CatalogError("Python 3.12 or newer is required (3.10.12+ and 3.11.4+ also work)")
         for secret in (self.layout.secrets / "config.ini", self.layout.secrets / "postgres_password"):
             self.require_safe_file(secret, secret=True)
             if secret.stat().st_size == 0:
@@ -555,8 +558,6 @@ WantedBy=timers.target
                 raise CatalogError("email.EMAIL_PORT must be between 1 and 65535")
         self.command_output(["docker", "info"])
         self.command_output(["docker", "compose", "version"])
-        if sys.version_info < (3, 10):
-            raise CatalogError("Python 3.10 or newer is required")
         if MAX_MAP_COUNT_PATH.exists() and int(MAX_MAP_COUNT_PATH.read_text().strip()) < MAX_MAP_COUNT:
             raise CatalogError(f"vm.max_map_count must be at least {MAX_MAP_COUNT}")
         if shutil.disk_usage(self.layout.var).free < 10 * 1024**3:

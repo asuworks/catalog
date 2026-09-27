@@ -488,7 +488,7 @@ A first staging deployment may use a candidate, but a first production deploymen
 
 ### Provision the host
 
-Install Git, GNU Make, Python 3.10 or newer, `xz`, Docker Engine, and Docker Compose v2.
+Install Git, GNU Make, Python 3.12 or newer (3.10.12+ and 3.11.4+ also work), `xz`, Docker Engine, and Docker Compose v2.
 Give the operator Docker access, then log out and back in so group membership is active.
 
 On the workstation, create the checksum and transfer the approved handoff and dump:
