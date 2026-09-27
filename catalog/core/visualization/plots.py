@@ -1,3 +1,5 @@
+import textwrap
+
 import pandas as pd
 import plotly.graph_objs as go
 
@@ -292,25 +294,59 @@ def documentation_standards_timeseries_plot(publication_df: pd.DataFrame, public
     return {'count': count_timeseries, 'percent': percent_timeseries}
 
 
+def two_line_label(name, width=28):
+    lines = textwrap.wrap(name, width) or ['']
+    if len(lines) > 2:
+        lines = [lines[0], textwrap.shorten(' '.join(lines[1:]), width, placeholder='…')]
+    return '<br>'.join(lines)
+
+
+def top_ten_bar_plot(names, counts, title):
+    names = [str(name) for name in names]
+    counts = list(counts)
+    # numeric positions keep bars distinct even when shortened labels collide
+    positions = list(range(len(names)))
+    data = [
+        go.Bar(
+            x=counts,
+            y=positions,
+            orientation='h',
+            hovertext=names,
+            hoverinfo='text+x',
+        )
+    ]
+
+    layout = go.Layout(
+        title=title,
+        height=540,
+        xaxis=go.layout.XAxis(
+            title='# of publications',
+            rangemode='tozero',
+            # small counts would otherwise get fractional ticks
+            dtick=1 if max(counts, default=0) <= 5 else None,
+        ),
+        yaxis=go.layout.YAxis(
+            tickvals=positions,
+            ticktext=[two_line_label(name) for name in names],
+            autorange='reversed',
+            automargin=True,
+        ),
+    )
+
+    return go.Figure(data=data, layout=layout)
+
+
 def top_author_plot(publication_author_df, publication_pks):
     matching_authors_df = publication_author_df.loc[publication_author_df.index.intersection(publication_pks)]
     df = matching_authors_df.groupby('author_id') \
              .agg({'name': ['first', 'count']}) \
              .sort_values(by=('name', 'count'), ascending=False).iloc[:10]
 
-    data = [
-        go.Bar(
-            x=df.loc[:, ('name', 'first')].to_list(),
-            y=df.loc[:, ('name', 'count')].to_list(),
-        )
-    ]
-
-    layout = go.Layout(
-        title='Top 10 most published authors',
-        yaxis=go.layout.YAxis(title='# of publications')
+    return top_ten_bar_plot(
+        df.loc[:, ('name', 'first')].to_list(),
+        df.loc[:, ('name', 'count')].to_list(),
+        'Top 10 most published authors',
     )
-
-    return go.Figure(data=data, layout=layout)
 
 
 def top_journal_plot(container_df, publication_pks):
@@ -319,19 +355,11 @@ def top_journal_plot(container_df, publication_pks):
              .agg({'container_name': ['first'], 'container_id': ['count']}) \
              .sort_values(by=('container_id', 'count'), ascending=False).iloc[:10]
 
-    data = [
-        go.Bar(
-            x=df.loc[:, ('container_name', 'first')].to_list(),
-            y=df.loc[:, ('container_id', 'count')].to_list(),
-        )
-    ]
-
-    layout = go.Layout(
-        title='Top 10 most published journals',
-        yaxis=go.layout.YAxis(title='# of publications')
+    return top_ten_bar_plot(
+        df.loc[:, ('container_name', 'first')].to_list(),
+        df.loc[:, ('container_id', 'count')].to_list(),
+        'Top 10 most published journals',
     )
-
-    return go.Figure(data=data, layout=layout)
 
 
 def top_platform_plot(publication_platform_df, publication_pks):
@@ -340,19 +368,11 @@ def top_platform_plot(publication_platform_df, publication_pks):
         .agg({'platform_id': ['count'], 'platform_name': ['first']}) \
         .sort_values(by=('platform_id', 'count'), ascending=False).iloc[:10]
 
-    data = [
-        go.Bar(
-            x=df.loc[:, ('platform_name', 'first')].to_list(),
-            y=df.loc[:, ('platform_id', 'count')].to_list()
-        )
-    ]
-
-    layout = go.Layout(
-        title='Top 10 most popular platforms',
-        yaxis=go.layout.YAxis(title='# of publications')
+    return top_ten_bar_plot(
+        df.loc[:, ('platform_name', 'first')].to_list(),
+        df.loc[:, ('platform_id', 'count')].to_list(),
+        'Top 10 most popular platforms',
     )
-
-    return go.Figure(data=data, layout=layout)
 
 
 def top_sponsor_plot(publication_sponsor_df, publication_pks):
@@ -361,16 +381,8 @@ def top_sponsor_plot(publication_sponsor_df, publication_pks):
         .agg({'sponsor_id': ['count'], 'sponsor_name': ['first']}) \
         .sort_values(by=('sponsor_id', 'count'), ascending=False).iloc[:10]
 
-    data = [
-        go.Bar(
-            x=df.loc[:, ('sponsor_name', 'first')].to_list(),
-            y=df.loc[:, ('sponsor_id', 'count')].to_list()
-        )
-    ]
-
-    layout = go.Layout(
-        title='Top 10 sponsors',
-        yaxis=go.layout.YAxis(title='# of publications')
+    return top_ten_bar_plot(
+        df.loc[:, ('sponsor_name', 'first')].to_list(),
+        df.loc[:, ('sponsor_id', 'count')].to_list(),
+        'Top 10 sponsors',
     )
-
-    return go.Figure(data=data, layout=layout)
