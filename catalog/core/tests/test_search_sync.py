@@ -126,5 +126,5 @@ class SearchSyncTest(BaseTest):
 
         self.assertCountEqual(
             contributions[self.publication.pk],
-            ['testcase (66)%', 'other-curator (33)%'],
+            ['testcase (66%)', 'other-curator (33%)'],
         )

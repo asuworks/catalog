@@ -563,7 +563,7 @@ class CuratorPublicationDoc(PublicationDocument):
         assigned_curator = publication.assigned_curator
         if contributor_data is None:
             contributor_data = [
-                '{0} ({1})%'.format(item['creator'], item['contribution'])
+                _contribution_label(item['creator'], item['contribution'])
                 for item in publication.contributor_data()
             ]
         doc = cls(
@@ -827,6 +827,10 @@ def _document_actions(doc_class, queryset):
         yield doc_class.from_instance(instance)
 
 
+def _contribution_label(creator, percentage):
+    return '{0} ({1}%)'.format(creator, percentage)
+
+
 def _curator_contributor_data():
     publication_table = Publication._meta.model_name
     rows = list(
@@ -855,10 +859,7 @@ def _curator_contributor_data():
     for row in rows:
         publication_id = row['search_publication_id']
         percentage = row['contribution_count'] * 100 // totals[publication_id]
-        value = '{0} ({1})%'.format(
-            row['audit_command__creator__username'],
-            percentage,
-        )
+        value = _contribution_label(row['audit_command__creator__username'], percentage)
         contributions[publication_id].append((row['last_contribution'], value))
 
     return {
