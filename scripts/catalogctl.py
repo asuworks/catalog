@@ -980,6 +980,12 @@ WantedBy=timers.target
             user, database = self.db_identity(compose_file)
             if confirm != database:
                 raise CatalogError(f"set CONFIRM={database} to authorize the database swap")
+            existing = self.database_counts(compose_file, user, database)["citation_publication"]
+            if existing:
+                raise CatalogError(
+                    f"{database} already contains {existing} publications; restore requires the empty "
+                    "database of a fresh host, so investigate and move that database aside first"
+                )
             candidate = self.update_candidate(
                 candidate,
                 restore_status="in_progress",

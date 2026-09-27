@@ -136,6 +136,7 @@ A fresh host restores `.dump`, `.sql`, or `.sql.xz` into a temporary database.
 An adjacent checksum is verified when present.
 Plain SQL containing database creation, deletion, alteration, or `\connect` is rejected.
 The restored database must contain Citation publications and no unvalidated constraints before its name is swapped into place.
+Restore refuses to replace a database that already contains publications.
 A JSON receipt records the dump checksum, size, PostgreSQL versions, counts, and retained prior database name.
 An interrupted restore remains locked until an operator investigates it and records an explicit candidate retry.
 

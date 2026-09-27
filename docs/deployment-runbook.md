@@ -572,6 +572,7 @@ The backup after activation creates the first verified backup for the new releas
 
 Restore accepts `.dump`, `.sql`, and `.sql.xz`.
 It verifies an adjacent `<dump>.sha256` file when present, rejects database-level commands in plain SQL, restores into a temporary database, validates data counts and constraints, then atomically swaps database names.
+It refuses to replace a database that already contains publications.
 The previous empty database is retained under a timestamped name.
 
 Compare total, primary, public, and search counts with the source database and staging expectations.

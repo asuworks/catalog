@@ -358,6 +358,28 @@ class ControllerTestCase(unittest.TestCase):
             self.controller.restore(dump, "comses_catalog")
         compose.assert_not_called()
 
+    def test_restore_refuses_a_database_that_already_has_publications(self) -> None:
+        self.provision()
+        self.write_candidate(restore_status="pending")
+        dump = Path(self.temporary.name) / "catalog.sql"
+        dump.write_text("SELECT 1;\n", encoding="utf-8")
+
+        with (
+            mock.patch.object(self.controller, "compose"),
+            mock.patch.object(self.controller, "db_identity", return_value=("catalog", "comses_catalog")),
+            mock.patch.object(
+                self.controller,
+                "database_counts",
+                return_value={"citation_publication": 5, "primary_publication": 2},
+            ),
+            mock.patch.object(self.controller, "psql") as psql,
+            self.assertRaisesRegex(catalogctl.CatalogError, "already contains 5 publications"),
+        ):
+            self.controller.restore(dump, "comses_catalog")
+
+        psql.assert_not_called()
+        self.assertEqual(catalogctl.require_json(self.layout.candidate)["restore_status"], "pending")
+
     def test_schema_migration_requires_confirmation_and_runs_ordered_guards(self) -> None:
         self.provision()
         self.write_candidate()
