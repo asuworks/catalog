@@ -131,6 +131,30 @@ class ControllerTestCase(unittest.TestCase):
                     capture=False,
                 )
 
+    def test_host_requires_an_explicit_http_bind_address(self) -> None:
+        self.provision()
+        cases = (
+            ("127.0.0.1:80", True),
+            ("0.0.0.0:80", True),
+            ("[::1]:8080", True),
+            ("80", False),
+            ("localhost:80", False),
+            ("::1:80", False),
+            ("127.0.0.1:0", False),
+        )
+        for bind, accepted in cases:
+            with self.subTest(bind=bind):
+                lines = [
+                    f"CATALOG_HTTP_BIND={bind}" if line.startswith("CATALOG_HTTP_BIND=") else line
+                    for line in self.layout.host_env.read_text(encoding="utf-8").splitlines()
+                ]
+                self.layout.host_env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                if accepted:
+                    self.assertEqual(self.controller.host().http_bind, bind)
+                else:
+                    with self.assertRaisesRegex(catalogctl.CatalogError, "explicit <address>:<port>"):
+                        self.controller.host()
+
     def test_host_rejects_writable_identity_file(self) -> None:
         self.provision()
         self.layout.host_env.chmod(0o666)

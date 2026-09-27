@@ -10,6 +10,7 @@ import fcntl
 import getpass
 import hashlib
 import io
+import ipaddress
 import json
 import lzma
 import os
@@ -174,6 +175,21 @@ def validate_revision(value: str) -> str:
     return value
 
 
+def valid_http_bind(value: str) -> bool:
+    address, _, port = value.rpartition(":")
+    if not re.fullmatch(r"[0-9]{1,5}", port) or not 1 <= int(port) <= 65535:
+        return False
+    if address.startswith("[") and address.endswith("]"):
+        address = address[1:-1]
+    elif ":" in address:
+        return False
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class Layout:
     etc: Path
@@ -291,6 +307,8 @@ class HostConfig:
             raise CatalogError("COMPOSE_PROJECT_NAME must be catalog")
         if values["CATALOG_DOMAIN"] != HOST_DOMAINS[host_id]:
             raise CatalogError(f"CATALOG_DOMAIN does not match fixed {host_id} identity")
+        if not valid_http_bind(values["CATALOG_HTTP_BIND"]):
+            raise CatalogError("CATALOG_HTTP_BIND must be an explicit <address>:<port>, such as 127.0.0.1:80")
         return cls(
             host_id,
             values["CATALOG_ENV"],
@@ -1711,7 +1729,10 @@ WantedBy=timers.target
         active = self.active_state()
         rollback = read_json(self.layout.rollback)
         candidate = read_json(self.layout.candidate)
-        print(f"Host: {host.host_id} domain={host.domain} project={host.project_name}")
+        print(
+            f"Host: {host.host_id} domain={host.domain} project={host.project_name} "
+            f"http_bind={host.http_bind}"
+        )
         if active:
             print(f"Active: {active['image']} bundle={active['bundle_revision']}")
         else:

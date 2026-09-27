@@ -618,7 +618,8 @@ Do not change the database password in only one secret file.
 `host-check` requires the password in `config.ini` to match `postgres_password`.
 
 Nginx binds to `127.0.0.1:80` for a same-host TLS proxy by default.
-If ingress reaches the VM over the network, change `CATALOG_HTTP_BIND` in `host.env` to the required bind address and restore file permissions afterward.
+If ingress reaches the VM over the network, change `CATALOG_HTTP_BIND` in `host.env` to an explicit `<address>:<port>` and restore file permissions afterward.
+`make status` shows the bind in use.
 
 ### Status and reports
 
